@@ -37,8 +37,7 @@ describe "BLAKE3ZMQ integration (socket-level)" do
       Sync do
         pull = OMQ::PULL.new
         pull.mechanism = blake3_server(server_pub, server_sec)
-        pull.bind("tcp://127.0.0.1:0")
-        port = pull.last_tcp_port
+        port = pull.bind("tcp://127.0.0.1:0").port
 
         push = OMQ::PUSH.new
         push.mechanism = blake3_client(server_key: server_pub)
@@ -63,8 +62,7 @@ describe "BLAKE3ZMQ integration (socket-level)" do
       Sync do |task|
         rep = OMQ::REP.new
         rep.mechanism = blake3_server(server_pub, server_sec)
-        rep.bind("tcp://127.0.0.1:0")
-        port = rep.last_tcp_port
+        port = rep.bind("tcp://127.0.0.1:0").port
 
         task.async do
           msg = rep.receive
@@ -152,8 +150,7 @@ describe "BLAKE3ZMQ integration (socket-level)" do
       Sync do |task|
         xpub = OMQ::XPUB.new
         xpub.mechanism = blake3_server(server_pub, server_sec)
-        xpub.bind("tcp://127.0.0.1:0")
-        port = xpub.last_tcp_port
+        port = xpub.bind("tcp://127.0.0.1:0").port
 
         xsub = OMQ::XSUB.new
         xsub.mechanism = blake3_client(server_key: server_pub)
@@ -181,8 +178,7 @@ describe "BLAKE3ZMQ integration (socket-level)" do
       Sync do |task|
         rep = OMQ::REP.new
         rep.mechanism = blake3_server(server_pub, server_sec)
-        rep.bind("tcp://127.0.0.1:0")
-        port = rep.last_tcp_port
+        port = rep.bind("tcp://127.0.0.1:0").port
 
         task.async do
           2.times do
@@ -220,8 +216,7 @@ describe "BLAKE3ZMQ integration (socket-level)" do
       Sync do
         pull = OMQ::PULL.new
         pull.mechanism = blake3_server(server_pub, server_sec)
-        pull.bind("tcp://127.0.0.1:0")
-        port = pull.last_tcp_port
+        port = pull.bind("tcp://127.0.0.1:0").port
 
         push = OMQ::PUSH.new
         push.mechanism = blake3_client(server_key: server_pub)

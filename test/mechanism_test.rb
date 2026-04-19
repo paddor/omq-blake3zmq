@@ -193,6 +193,7 @@ describe Protocol::ZMTP::Mechanism::Blake3 do
         end
         client_wrapper.define_singleton_method(:flush) { client_io.flush }
         client_wrapper.define_singleton_method(:read_exactly) { |n| client_io.read_exactly(n) }
+        client_wrapper.define_singleton_method(:peek) { |&block| client_io.peek(&block) }
         client_wrapper.define_singleton_method(:close) { client_io.close }
 
         server_writes = []
@@ -203,6 +204,7 @@ describe Protocol::ZMTP::Mechanism::Blake3 do
         end
         server_wrapper.define_singleton_method(:flush) { server_io.flush }
         server_wrapper.define_singleton_method(:read_exactly) { |n| server_io.read_exactly(n) }
+        server_wrapper.define_singleton_method(:peek) { |&block| server_io.peek(&block) }
         server_wrapper.define_singleton_method(:close) { server_io.close }
 
         server_mech = Blake3Mech.server(public_key: server_pub, secret_key: server_sec, crypto: Crypto)

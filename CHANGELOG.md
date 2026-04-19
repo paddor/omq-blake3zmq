@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Gem renamed to `omq-blake3zmq`** (from `omq-rfc-blake3zmq`). Require
+  path moves from `omq/rfc/blake3zmq` to `omq/blake3zmq`; library file
+  relocated from `lib/omq/rfc/blake3zmq.rb` to `lib/omq/blake3zmq.rb`.
+  The `rfc/` namespace was an unnecessary layer — this is a mechanism
+  plugin gem, not a spec repository.
+- **Handshake API: `metadata:` hash replaces `qos:`/`qos_hash:` kwargs.**
+  Aligns with protocol-zmtp's pluggable-metadata handshake signature.
+  Extra READY properties (including QoS negotiation) are passed through
+  a single `metadata:` hash.
+
+### Fixed
+
+- Integration tests updated for current omq API (`bind` returns a URI
+  with `#port` instead of a separate `#last_tcp_port` accessor).
+
 ## 0.2.1 — 2026-04-15
 
 - Test suite updated for omq 0.20 socket API (`linger` setter, positional

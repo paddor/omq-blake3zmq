@@ -8,7 +8,7 @@
 require "bundler/setup"
 require "protocol/zmtp"
 require "protocol/zmtp/mechanism/curve"
-require "omq/rfc/blake3zmq"
+require "omq/blake3zmq"
 require "rbnacl"
 require "socket"
 require "io/stream"

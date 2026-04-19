@@ -144,14 +144,13 @@ module Protocol
         # @param as_server [Boolean] ignored (role is set at construction)
         # @param socket_type [String] ZMTP socket type name
         # @param identity [String] socket identity
-        # @param qos [Integer] QoS level
-        # @param qos_hash [String] QoS hash algorithm preference string
-        # @return [Hash] peer metadata including +:peer_socket_type+, +:peer_identity+, +:peer_qos+, +:peer_qos_hash+
-        def handshake!(io, as_server:, socket_type:, identity:, qos: 0, qos_hash: "")
+        # @param metadata [Hash{String => String}, nil] extra READY properties
+        # @return [Hash] peer metadata including +:peer_socket_type+, +:peer_identity+, +:peer_properties+
+        def handshake!(io, as_server:, socket_type:, identity:, metadata: nil)
           if @as_server
-            server_handshake!(io, socket_type:, identity:, qos:, qos_hash:)
+            server_handshake!(io, socket_type:, identity:, metadata:)
           else
-            client_handshake!(io, socket_type:, identity:, qos:, qos_hash:)
+            client_handshake!(io, socket_type:, identity:, metadata:)
           end
         end
 
@@ -209,7 +208,7 @@ module Protocol
         # Client-side handshake
         # ----------------------------------------------------------------
 
-        def client_handshake!(io, socket_type:, identity:, qos: 0, qos_hash: "")
+        def client_handshake!(io, socket_type:, identity:, metadata: nil)
           # Generate ephemeral keypair
           cn_secret = @crypto::PrivateKey.generate
           cn_public = cn_secret.public_key
@@ -282,11 +281,8 @@ module Protocol
           initiate_nonce = kdf24("#{PROTOCOL_ID} INITIATE nonce", dh2 + h)
 
           props = { "Socket-Type" => socket_type, "Identity" => identity }
-          if qos > 0
-            props["X-QoS"]      = qos.to_s
-            props["X-QoS-Hash"] = qos_hash unless qos_hash.empty?
-          end
-          metadata = Codec::Command.encode_properties(props)
+          props.merge!(metadata) if metadata && !metadata.empty?
+          metadata_bytes = Codec::Command.encode_properties(props)
 
           dh3 = @permanent_secret.diffie_hellman(sn_public)
           validate_dh!(dh3, "dh3")
@@ -297,7 +293,7 @@ module Protocol
             vouch_nonce, cn_public.to_s + @server_public.to_s, aad: "VOUCH"
           )
 
-          initiate_plaintext = @permanent_public.to_s + vouch_box + metadata
+          initiate_plaintext = @permanent_public.to_s + vouch_box + metadata_bytes
 
           initiate_box = @crypto::Cipher.new(initiate_key).encrypt(
             initiate_nonce, initiate_plaintext, aad: "INITIATE"
@@ -337,8 +333,6 @@ module Protocol
           peer_props       = Codec::Command.decode_properties(ready_plain)
           peer_socket_type = peer_props["Socket-Type"]
           peer_identity    = peer_props["Identity"] || ""
-          peer_qos         = (peer_props["X-QoS"] || "0").to_i
-          peer_qos_hash    = peer_props["X-QoS-Hash"] || ""
 
           # h4 = H(h3 || READY_wire_bytes)
           h = hash(h + ready_frame.to_wire)
@@ -349,8 +343,9 @@ module Protocol
           {
             peer_socket_type:,
             peer_identity:,
-            peer_qos:,
-            peer_qos_hash:
+            peer_properties: peer_props,
+            peer_major:      peer_greeting[:major],
+            peer_minor:      peer_greeting[:minor],
           }
         end
 
@@ -359,7 +354,7 @@ module Protocol
         # Server-side handshake
         # ----------------------------------------------------------------
 
-        def server_handshake!(io, socket_type:, identity:, qos: 0, qos_hash: "")
+        def server_handshake!(io, socket_type:, identity:, metadata: nil)
           # Exchange greetings
           our_greeting = Codec::Greeting.encode(mechanism: MECHANISM_NAME, as_server: true)
           io.write(our_greeting)
@@ -522,10 +517,7 @@ module Protocol
 
           # --- READY ---
           ready_props = { "Socket-Type" => socket_type, "Identity" => identity }
-          if qos > 0
-            ready_props["X-QoS"]      = qos.to_s
-            ready_props["X-QoS-Hash"] = qos_hash unless qos_hash.empty?
-          end
+          ready_props.merge!(metadata) if metadata && !metadata.empty?
           ready_metadata = Codec::Command.encode_properties(ready_props)
 
           ready_key   = kdf("#{PROTOCOL_ID} READY key", dh2 + h)
@@ -550,8 +542,9 @@ module Protocol
           {
             peer_socket_type: props["Socket-Type"],
             peer_identity:    props["Identity"] || "",
-            peer_qos:         (props["X-QoS"] || "0").to_i,
-            peer_qos_hash:    props["X-QoS-Hash"] || "",
+            peer_properties:  props,
+            peer_major:       peer_greeting[:major],
+            peer_minor:       peer_greeting[:minor],
           }
         end
 

@@ -31,7 +31,7 @@ See [RFC.md](RFC.md) for the full protocol specification.
 ## Installation
 
 ```ruby
-gem "omq-rfc-blake3zmq"
+gem "omq-blake3zmq"
 ```
 
 Batteries included: ships with [x25519](https://github.com/RubyCrypto/x25519)
@@ -42,7 +42,7 @@ Batteries included: ships with [x25519](https://github.com/RubyCrypto/x25519)
 
 ```ruby
 require "omq"
-require "omq/rfc/blake3zmq"
+require "omq/blake3zmq"
 
 Crypto = OMQ::Blake3ZMQ::Crypto
 

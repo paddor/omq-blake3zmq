@@ -3,7 +3,7 @@
 $VERBOSE = nil
 
 require "minitest/autorun"
-require "omq/rfc/blake3zmq"
+require "omq/blake3zmq"
 require "socket"
 require "io/stream"
 require "async"
