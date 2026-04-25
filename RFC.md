@@ -378,16 +378,41 @@ Each message is a single ZMTP message frame (not a command frame):
 ```
 
 - `flags`: Standard ZMTP 3.1 flags byte. MORE bit (bit 0) MUST be zero
-  (single-frame messages only). COMMAND bit (bit 2) MUST be zero.
-- `length`: Ciphertext length + 32 (tag size). Encoded as 1 byte (short)
-  or 8 bytes (long) per ZMTP 3.1.
+  (single-frame messages only). COMMAND bit (bit 2) MUST be zero
+  (data-phase frames are not commands). LONG bit (bit 1) is set when
+  `length` requires the 8-byte encoding.
+- `length`: Ciphertext length + 32 (tag size). Encoded as 1 byte
+  (when ≤ 255) or 8 bytes big-endian (when > 255), per ZMTP 3.1.
 - `ciphertext`: The encrypted message payload.
 - `tag`: 32-byte BLAKE3 authentication tag.
 
-The `flags` byte is used as additional authenticated data (AAD) for the
-AEAD operation. This binds the frame type to the ciphertext, preventing
-an attacker from flipping flag bits (e.g. MORE, COMMAND) without
-detection.
+#### Additional Authenticated Data
+
+The AEAD binds **every wire byte that is not itself encrypted**. Concretely:
+
+```
+aad = flags_byte || length_bytes
+```
+
+where `flags_byte` is the exact 1-byte value transmitted (including the
+LONG bit when set) and `length_bytes` is the exact 1- or 8-byte length
+encoding transmitted. The remaining wire bytes — `ciphertext` and `tag`
+— are protected by the AEAD itself.
+
+This guarantees that **no wire byte can be modified without detection**:
+flipping any bit in `flags` (MORE / LONG / COMMAND), or any bit in
+`length`, causes AEAD verification to fail at the receiver. The
+guarantee is independent of any internal length-binding the AEAD
+primitive may or may not perform.
+
+The sender computes `length_bytes` from `ciphertext_len = plaintext_len
++ 32` *before* invoking the AEAD, then runs `Encrypt(key, nonce,
+plaintext, aad)` with the constructed AAD.
+
+The receiver reconstructs the same AAD from the wire bytes it actually
+read (the `flags` byte it parsed and the `length` bytes it consumed),
+then runs `Decrypt(key, nonce, ciphertext, aad)`. Tag verification fails
+if any of those bytes were modified in flight.
 
 No counter is sent on the wire. Both peers maintain synchronized internal
 counters. TCP guarantees ordered delivery; if the connection breaks, both

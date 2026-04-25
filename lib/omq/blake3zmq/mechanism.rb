@@ -157,6 +157,11 @@ module Protocol
 
         # Encrypts a ZMTP frame body for transmission.
         #
+        # The AEAD AAD per RFC §10.3 is `flags_byte || length_bytes` —
+        # every wire byte that is not itself encrypted. This binds the
+        # full wire envelope (including the LONG bit and the size
+        # field) so any single-bit modification fails verification.
+        #
         # @param body [String] plaintext frame body
         # @param more [Boolean] whether the MORE flag is set
         # @param command [Boolean] whether this is a command frame
@@ -166,22 +171,30 @@ module Protocol
           flags |= 0x01 if more
           flags |= 0x04 if command
 
-          ct         = @send_stream.encrypt(body, aad: flags.chr)
-          frame_size = ct.bytesize
+          # ChaCha20-BLAKE3 ciphertext is plaintext + 32-byte tag.
+          frame_size = body.bytesize + TAG_SIZE
 
           if frame_size > 255
-            wire = String.new(encoding: Encoding::BINARY, capacity: 9 + frame_size)
-            wire << (flags | 0x02).chr << [frame_size].pack("Q>")
+            wire_flags = (flags | 0x02).chr
+            length_bytes = [frame_size].pack("Q>")
           else
-            wire = String.new(encoding: Encoding::BINARY, capacity: 2 + frame_size)
-            wire << flags.chr << frame_size.chr
+            wire_flags = flags.chr
+            length_bytes = frame_size.chr
           end
+          aad = wire_flags + length_bytes
 
-          wire << ct
+          ct = @send_stream.encrypt(body, aad: aad)
+
+          wire = String.new(encoding: Encoding::BINARY, capacity: aad.bytesize + frame_size)
+          wire << aad << ct
         end
 
 
         # Decrypts an encrypted ZMTP frame.
+        #
+        # The AAD is reconstructed from the exact wire bytes the codec
+        # parsed: the flags byte (with LONG bit if the frame was long)
+        # and the length encoding that followed it.
         #
         # @param frame [Codec::Frame] encrypted frame with body, more?, and command? attributes
         # @return [Codec::Frame] decrypted frame
@@ -191,8 +204,18 @@ module Protocol
           flags |= 0x01 if frame.more?
           flags |= 0x04 if frame.command?
 
+          frame_size = frame.body.bytesize
+          if frame_size > 255
+            wire_flags = (flags | 0x02).chr
+            length_bytes = [frame_size].pack("Q>")
+          else
+            wire_flags = flags.chr
+            length_bytes = frame_size.chr
+          end
+          aad = wire_flags + length_bytes
+
           begin
-            pt = @recv_stream.decrypt(frame.body, aad: flags.chr)
+            pt = @recv_stream.decrypt(frame.body, aad: aad)
           rescue @crypto::CryptoError
             raise Error, "decryption failed"
           end
