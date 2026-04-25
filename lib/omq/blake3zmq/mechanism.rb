@@ -527,7 +527,11 @@ module Protocol
           end
 
           if @authenticator
-            peer = PeerInfo.new(public_key: client_permanent)
+            # Authenticator runs against the long-term public key; the
+            # identity (a runtime metadata field) is parsed later from
+            # initiate_plain. Pass an empty identity, matching the
+            # CURVE mechanism's authenticator-side convention.
+            peer = PeerInfo.new(public_key: client_permanent, identity: "")
             unless @authenticator.call(peer)
               send_error(io, "client key not authorized")
               raise Error, "client key not authorized"
