@@ -83,14 +83,24 @@ BLAKE3ZMQ is a ZMTP 3.1 security mechanism. The mechanism name in the ZMTP
 greeting is `BLAKE3` (6 octets, null-padded to 20). The `as-server` field in
 the greeting determines which peer is client and which is server.
 
-The handshake consists of four ZMTP command frames, followed by a data phase
-where ZMTP message frames carry encrypted application data.
+The handshake consists of four ZMTP command frames (HELLO, WELCOME,
+INITIATE, READY) carrying their own AEAD-encrypted boxes, followed by a
+data phase where **every frame — data or command — is AEAD-encrypted
+under the per-direction session key**.
 
-In the wire format diagrams below, numbers in parentheses are **byte
-counts**. The ZMTP command frame body begins with a 1-byte name length
-followed by the ASCII command name (per ZMTP 3.1); the remaining bytes
-are command-specific data. Total sizes include the name-length byte and
-name.
+In the data phase the ZMTP COMMAND bit (in the wire flags byte) is
+preserved through the encryption: it indicates that the encrypted
+plaintext is a ZMTP command (SUBSCRIBE / CANCEL / JOIN / LEAVE / PING /
+PONG / ERROR) rather than application message content. The COMMAND bit
+is part of the AAD (§10.3) so an attacker cannot reframe a data frame
+as a command or vice versa. There is no plaintext post-handshake frame
+on the wire.
+
+In the handshake wire format diagrams below, numbers in parentheses are
+**byte counts**. The ZMTP command frame body begins with a 1-byte name
+length followed by the ASCII command name (per ZMTP 3.1); the remaining
+bytes are command-specific data. Total sizes include the name-length
+byte and name.
 
 ## 8. Transcript Hash
 
@@ -367,7 +377,11 @@ key is catastrophic for any stream cipher.
 
 ### 10.3 Wire Format
 
-Each message is a single ZMTP message frame (not a command frame):
+**Every post-handshake frame is AEAD-encrypted, with no exceptions.**
+The same wire shape applies whether the plaintext body is application
+data or a ZMTP command (SUBSCRIBE, CANCEL, JOIN, LEAVE, PING, PONG,
+ERROR). The only thing the COMMAND bit changes is how the receiver
+parses the *plaintext* after AEAD verification:
 
 ```
 +-----------+----------------+------------------+-----------+
@@ -378,16 +392,24 @@ Each message is a single ZMTP message frame (not a command frame):
 ```
 
 - `flags`: Standard ZMTP 3.1 flags byte. MORE bit (bit 0) carries
-  multipart-message semantics from the application unchanged: set on
-  every frame of a multipart message except the last. COMMAND bit
-  (bit 2) MUST be zero (data-phase frames are never commands; ZMTP
-  command frames bypass the BLAKE3ZMQ data-phase entirely and are
-  not encrypted). LONG bit (bit 1) is set when `length` requires the
-  8-byte encoding.
+  multipart-message semantics from the application unchanged. COMMAND
+  bit (bit 2) is set when the encrypted plaintext is a ZMTP command
+  (SUBSCRIBE / CANCEL / JOIN / LEAVE / PING / PONG / ERROR) rather
+  than application data. LONG bit (bit 1) is set when `length`
+  requires the 8-byte encoding.
 - `length`: Ciphertext length + 32 (tag size). Encoded as 1 byte
   (when ≤ 255) or 8 bytes big-endian (when > 255), per ZMTP 3.1.
-- `ciphertext`: The encrypted message payload.
+- `ciphertext`: The encrypted frame body. For data frames this is
+  the application payload. For command frames it is the ZMTP command
+  body (`name_len || name || command-data`).
 - `tag`: 32-byte BLAKE3 authentication tag.
+
+The receiver demultiplexes data vs command on the wire COMMAND bit
+*after* AEAD verification: the bit is part of `flags`, which is in
+the AAD, so it cannot be flipped without detection (§10.3 AAD).
+Subscriptions, group joins, heartbeats, and rejection signals all
+travel through the same encrypted pipe as application data. There is
+no plaintext post-handshake frame on the wire.
 
 #### Additional Authenticated Data
 
