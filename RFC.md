@@ -160,16 +160,18 @@ follow CurveZMQ convention and may be reduced in a future revision.)
 ```
 +-------------+-----------+--------+-----------+-------------+
 | 0x05        | version   | C'     | padding   | hello_box   |
-| "HELLO"     | (2 bytes) | (32)   | (64)      | (96)        |
+| "HELLO"     | (2 bytes) | (32)   | (96)      | (96)        |
 | (6 bytes)   | 0x01,0x00 |        | zeros     |             |
 +-------------+-----------+--------+-----------+-------------+
 ```
 
-Total command body: 6 + 2 + 32 + 64 + 96 = 200 bytes.
+Total command body: 6 + 2 + 32 + 96 + 96 = 232 bytes.
 
-The 64-byte padding ensures HELLO (200 bytes) >= WELCOME (192 bytes),
+The 96-byte padding ensures HELLO (232 bytes) >= WELCOME (224 bytes),
 preventing amplification attacks where a small forged HELLO triggers a
-large WELCOME response.
+large WELCOME response. (The padding grew from 64 to 96 bytes when
+the cookie expanded to carry the transcript hash for stateless-server
+operation; the relative ordering is preserved.)
 
 **Server processing:**
 
@@ -184,22 +186,42 @@ Server generates a fresh ephemeral keypair `(S', s')`.
 
 **Cookie construction:**
 
-The cookie allows the server to remain stateless until INITIATE. It
-encrypts the server's ephemeral secret key and the client's ephemeral
-public key under a short-lived cookie key `K`.
+The cookie lets the server discard the per-connection *cryptographic*
+state between WELCOME and INITIATE — the server's ephemeral secret
+key `s'`, the first DH shared secret `dh1`, and the running transcript
+hash. The TCP connection itself, its I/O buffers, and a marker that
+this connection is awaiting INITIATE are not affected; "stateless"
+here means "no per-connection BLAKE3ZMQ cryptographic state is
+retained between WELCOME and INITIATE," not "no state of any kind."
+
+The cookie carries `C' || s' || h1` under a short-lived cookie key
+`K`:
 
 ```
 cookie_nonce = random(24)
 cookie_key   = KDF("BLAKE3ZMQ-1.0 cookie", K)
-cookie_box   = Encrypt(cookie_key, cookie_nonce, C' || s', aad = "COOKIE")
+cookie_box   = Encrypt(cookie_key, cookie_nonce, C' || s' || h1, aad = "COOKIE")
 cookie       = cookie_nonce || cookie_box
 ```
 
-Cookie size: 24 + 64 + 32(tag) = 120 bytes.
+Cookie size: 24 + 96 + 32(tag) = 152 bytes.
+
+Note that the cookie carries `h1` (the transcript hash *before*
+WELCOME) rather than `h2`. Putting `h2` in the cookie would create
+a circularity — `h2 = H(h1 || welcome_wire)` and `welcome_wire`
+embeds the cookie itself. Carrying `h1` lets the server recompute
+`h2` on receipt of INITIATE: chacha20-blake3 with a fixed
+(key, nonce, plaintext, aad) is deterministic, so the server can
+reconstruct the exact `welcome_wire` bytes it originally sent from
+the cookie's recovered values plus its own permanent secret, then
+hash them to obtain `h2`. See §9.3 server processing.
 
 The cookie nonce MUST be random because `K` is shared across connections.
-After creating the cookie, the server MAY discard `s'` and all connection
-state. The cookie key `K` MUST be rotated at least every 60 seconds.
+After creating the cookie, the server MAY discard `s'`, `dh1`, the
+transcript hash, and any other per-connection BLAKE3ZMQ state — every
+value the server needs at INITIATE time is either recoverable from
+the cookie or recomputable from values that are.
+The cookie key `K` MUST be rotated at least every 60 seconds.
 Implementations MUST NOT reuse a cookie key indefinitely. The rotation
 interval SHOULD NOT be shorter than the maximum expected HELLO-to-INITIATE
 round-trip time; otherwise clients on high-latency links will see
@@ -222,13 +244,13 @@ context string, producing an independent key.
 ```
 +---------------+------------------+
 | 0x07          | welcome_box      |
-| "WELCOME"     | (184 bytes)      |
+| "WELCOME"     | (216 bytes)      |
 | (8 bytes)     |                  |
 +---------------+------------------+
 ```
 
-Welcome box: 32(S') + 120(cookie) + 32(tag) = 184 bytes.
-Total command body: 8 + 184 = 192 bytes.
+Welcome box: 32(S') + 152(cookie) + 32(tag) = 216 bytes.
+Total command body: 8 + 216 = 224 bytes.
 
 **Client processing:**
 
@@ -278,7 +300,7 @@ initiate_box       = Encrypt(initiate_key, initiate_nonce, initiate_plaintext, a
 ```
 +---------------+---------------+------------------+
 | 0x08          | cookie        | initiate_box     |
-| "INITIATE"    | (120 bytes)   | (variable)       |
+| "INITIATE"    | (152 bytes)   | (variable)       |
 | (9 bytes)     |               |                  |
 +---------------+---------------+------------------+
 ```
@@ -287,13 +309,31 @@ Initiate box: 32(C) + 96(vouch) + metadata + 32(tag) = 160 + metadata bytes.
 
 **Server processing:**
 
-1. Decrypt cookie using `K` to recover `C'` and `s'`.
-2. Compute `dh2 = X25519(s', C')`. Abort if `dh2` is all zeros.
-3. Derive `initiate_key` and `initiate_nonce`.
-4. Decrypt `initiate_box`.
-5. Compute `dh3 = X25519(s', C)`. Abort if `dh3` is all zeros. Verify vouch.
-6. If an authenticator is configured, check `C` against authorized keys. The server MAY reject unknown clients with an ERROR command.
-7. Update transcript: `h3 = H(h2 || INITIATE_wire_bytes)`.
+1. Decrypt cookie using `K` (try the current cookie key first, then
+   the previous one if rotation has happened) to recover `C'`, `s'`,
+   and `h1`.
+2. Reconstruct `welcome_wire` deterministically. The server's
+   permanent secret `s` plus the recovered `C'` give back
+   `dh1 = X25519(s, C')`; from `dh1` and `h1` the server derives
+   `welcome_key` and `welcome_nonce`; the welcome plaintext is
+   `S' || cookie` where `S' = X25519_basepoint(s')` and `cookie` is
+   the same 152 bytes the client just returned. chacha20-blake3 with
+   the same key+nonce+plaintext+aad emits the exact ciphertext+tag
+   the original WELCOME contained.
+3. Compute `h2 = H(h1 || reconstructed_welcome_wire)`.
+4. Compute `dh2 = X25519(s', C')`. Abort if `dh2` is all zeros.
+5. Derive `initiate_key` and `initiate_nonce` from `dh2 || h2`.
+6. Decrypt `initiate_box`.
+7. Compute `dh3 = X25519(s', C)`. Abort if `dh3` is all zeros. Verify vouch.
+8. If an authenticator is configured, check `C` against authorized keys. The server MAY reject unknown clients with an ERROR command.
+9. Update transcript: `h3 = H(h2 || INITIATE_wire_bytes)`.
+
+Step 2's cost is one extra ChaCha20-BLAKE3 encryption per INITIATE
+(the welcome_box reconstruction). On a per-connection basis this is
+negligible. Implementations that don't need the stateless property
+MAY skip steps 2–3 by retaining `h2` from the WELCOME-send time;
+both paths produce the same `h2` value because welcome_wire
+reconstruction is deterministic.
 
 ### 9.4 READY (Server -> Client)
 
@@ -577,8 +617,8 @@ protected by the ephemeral key exchange.
 | Channel binding | Transcript hash `h4` mixed into data-phase key derivation |
 | No reflection attacks | Separate keys per direction (client->server != server->client) |
 | Identity protection | Client permanent key encrypted under ephemeral keys |
-| Anti-amplification | HELLO (200 bytes) >= WELCOME (192 bytes) |
-| Stateless server | Cookie mechanism; no per-connection state until INITIATE |
+| Anti-amplification | HELLO (232 bytes) >= WELCOME (224 bytes) |
+| Stateless server | Cookie carries `C' \|\| s' \|\| h1`; server discards all per-connection *cryptographic* state (`s'`, `dh1`, transcript hash) after WELCOME and recovers it from the cookie at INITIATE (recomputing `h2` via deterministic welcome_wire reconstruction; §9.3). The TCP connection itself stays open. |
 | Nonce misuse resistance | Nonces derived deterministically from DH and transcript; no randomness needed after ephemeral key generation |
 | Low-order point rejection | All DH outputs MUST be checked for all-zero value; abort on detection |
 | Frame flag integrity | Flags byte authenticated as AAD; prevents bit-flip attacks on frame type |
@@ -702,7 +742,8 @@ overhead at large N becomes a bottleneck.
 KEY_SIZE        = 32    # bytes
 NONCE_SIZE      = 24    # bytes
 TAG_SIZE        = 32    # bytes
-COOKIE_SIZE     = 120   # bytes (24 nonce + 64 payload + 32 tag)
+COOKIE_SIZE     = 152   # bytes (24 nonce + 96 payload + 32 tag)
+                        # payload = C'(32) || s'(32) || h1(32)
 MECHANISM_NAME  = "BLAKE3"
 PROTOCOL_ID     = "BLAKE3ZMQ-1.0"
 ```

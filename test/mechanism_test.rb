@@ -232,7 +232,7 @@ describe Protocol::ZMTP::Mechanism::Blake3 do
         hello_body_size = client_frames_bytes.getbyte(1)  # short frame
         hello_body = client_frames_bytes.byteslice(2, hello_body_size)
 
-        assert_equal 200, hello_body.bytesize, "HELLO command body should be 200 bytes"
+        assert_equal 232, hello_body.bytesize, "HELLO command body should be 232 bytes"
         assert_equal 0x05, hello_body.getbyte(0), "HELLO name length should be 5"
         assert_equal "HELLO", hello_body.byteslice(1, 5), "HELLO name"
 
@@ -256,9 +256,9 @@ describe Protocol::ZMTP::Mechanism::Blake3 do
 
         # INITIATE data = cookie(120) + initiate_box
         initiate_data = initiate_body.byteslice(9..)
-        assert initiate_data.bytesize >= 120 + 32, "INITIATE data must contain cookie(120) + at least tag(32)"
-        cookie_bytes = initiate_data.byteslice(0, 120)
-        assert_equal 120, cookie_bytes.bytesize, "cookie should be 120 bytes"
+        assert initiate_data.bytesize >= 152 + 32, "INITIATE data must contain cookie(152) + at least tag(32)"
+        cookie_bytes = initiate_data.byteslice(0, 152)
+        assert_equal 152, cookie_bytes.bytesize, "cookie should be 152 bytes"
 
         # Parse server frames (skip greeting)
         server_frames_bytes = server_bytes.byteslice(greeting_size..)
@@ -269,11 +269,11 @@ describe Protocol::ZMTP::Mechanism::Blake3 do
         welcome_body_size = server_frames_bytes.getbyte(1)
         welcome_body = server_frames_bytes.byteslice(2, welcome_body_size)
 
-        assert_equal 192, welcome_body.bytesize, "WELCOME command body should be 192 bytes"
+        assert_equal 224, welcome_body.bytesize, "WELCOME command body should be 224 bytes"
         assert_equal 0x07, welcome_body.getbyte(0), "WELCOME name length should be 7"
         assert_equal "WELCOME", welcome_body.byteslice(1, 7), "WELCOME name"
         welcome_box = welcome_body.byteslice(8..)
-        assert_equal 184, welcome_box.bytesize, "welcome_box should be 184 bytes"
+        assert_equal 216, welcome_box.bytesize, "welcome_box should be 216 bytes"
 
         # Second server frame: READY
         ready_offset = 2 + welcome_body_size

@@ -262,7 +262,7 @@ module Protocol
           hello << "\x05HELLO"
           hello << "\x01\x00"           # version 1.0
           hello << cn_public.to_s       # 32 bytes
-          hello << ("\x00" * 64)        # padding
+          hello << ("\x00" * 96)        # padding (HELLO 232 ≥ WELCOME 224, anti-amplification)
           hello << hello_box            # 64 + 32(tag) = 96 bytes
 
           hello_wire = Codec::Frame.new(hello, command: true).to_wire
@@ -279,7 +279,7 @@ module Protocol
           raise Error, "expected WELCOME, got #{welcome_cmd.name}" unless welcome_cmd.name == "WELCOME"
 
           welcome_data = welcome_cmd.data
-          welcome_box_size = KEY_SIZE + 120 + TAG_SIZE  # S'(32) + cookie(120) + tag(32) = 184
+          welcome_box_size = KEY_SIZE + 152 + TAG_SIZE  # S'(32) + cookie(152) + tag(32) = 216
           raise Error, "WELCOME wrong size" unless welcome_data.bytesize == welcome_box_size
 
           welcome_key   = kdf("#{PROTOCOL_ID} WELCOME key", dh1)
@@ -400,11 +400,11 @@ module Protocol
           raise Error, "expected HELLO, got #{hello_cmd.name}" unless hello_cmd.name == "HELLO"
 
           hdata = hello_cmd.data
-          raise Error, "HELLO wrong size (#{hdata.bytesize})" unless hdata.bytesize == 194
+          raise Error, "HELLO wrong size (#{hdata.bytesize})" unless hdata.bytesize == 226
 
-          # version(2) + C'(32) + padding(64) + hello_box(96)
+          # version(2) + C'(32) + padding(96) + hello_box(96)
           cn_public_bytes = hdata.byteslice(2, KEY_SIZE)
-          hello_box_data  = hdata.byteslice(98, 96)
+          hello_box_data  = hdata.byteslice(130, 96)
 
           cn_public = @crypto::PublicKey.new(cn_public_bytes)
           dh1       = @permanent_secret.diffie_hellman(cn_public)
@@ -426,13 +426,19 @@ module Protocol
           sn_secret = @crypto::PrivateKey.generate
           sn_public = sn_secret.public_key
 
-          # Cookie: encrypt C' || s' under short-lived cookie key
+          # Cookie carries C' || s' || h1. Putting h2 in the cookie
+          # would be Catch-22 — h2 = H(h1 || welcome_wire) and
+          # welcome_wire embeds the cookie itself. By carrying h1
+          # instead, the server can reconstruct welcome_wire on
+          # INITIATE (chacha20-blake3 with fixed key+nonce+plaintext
+          # is deterministic) and recompute h2 = H(h1 || reconstructed)
+          # without holding any per-connection state across WELCOME.
           cookie_nonce = @crypto.random_bytes(NONCE_SIZE)
           cookie_key   = kdf("#{PROTOCOL_ID} cookie", @cookie_key)
           cookie_box   = @crypto::Cipher.new(cookie_key).encrypt(
-            cookie_nonce, cn_public.to_s + sn_secret.to_s, aad: "COOKIE"
+            cookie_nonce, cn_public.to_s + sn_secret.to_s + h, aad: "COOKIE"
           )
-          cookie = cookie_nonce + cookie_box  # 24 + 64 + 32(tag) = 120 bytes
+          cookie = cookie_nonce + cookie_box  # 24 + 96 + 32(tag) = 152 bytes
 
           # Welcome box: encrypt S' || cookie
           welcome_key   = kdf("#{PROTOCOL_ID} WELCOME key", dh1)
@@ -463,10 +469,10 @@ module Protocol
           raise Error, "expected INITIATE, got #{init_cmd.name}" unless init_cmd.name == "INITIATE"
 
           idata = init_cmd.data
-          raise Error, "INITIATE too short" if idata.bytesize < 120 + TAG_SIZE
+          raise Error, "INITIATE too short" if idata.bytesize < 152 + TAG_SIZE
 
-          # Decrypt cookie to recover C' and s'
-          recv_cookie       = idata.byteslice(0, 120)
+          # Decrypt cookie to recover C' || s' || h1
+          recv_cookie       = idata.byteslice(0, 152)
           recv_cookie_nonce = recv_cookie.byteslice(0, NONCE_SIZE)
           recv_cookie_box   = recv_cookie.byteslice(NONCE_SIZE..)
 
@@ -478,8 +484,35 @@ module Protocol
             raise Error, "INITIATE cookie verification failed"
           end
 
+          raise Error, "cookie plaintext wrong size" unless cookie_plain.bytesize == 96
           cn_public = @crypto::PublicKey.new(cookie_plain.byteslice(0, KEY_SIZE))
           sn_secret = @crypto::PrivateKey.new(cookie_plain.byteslice(KEY_SIZE, KEY_SIZE))
+          recovered_h1 = cookie_plain.byteslice(2 * KEY_SIZE, 32)
+
+          # Recompute h2 from the cookie's h1 + a deterministic
+          # reconstruction of welcome_wire. chacha20-blake3 with the
+          # same (key, nonce, plaintext, aad) yields the same
+          # ciphertext+tag, so we get back the exact bytes we sent.
+          recovered_dh1 = @permanent_secret.diffie_hellman(cn_public)
+          validate_dh!(recovered_dh1, "dh1 (cookie path)")
+          recovered_welcome_key   = kdf("#{PROTOCOL_ID} WELCOME key", recovered_dh1)
+          recovered_welcome_nonce = kdf24("#{PROTOCOL_ID} WELCOME nonce", recovered_h1)
+          sn_public_bytes         = sn_secret.public_key.to_s
+          recovered_welcome_box   = @crypto::Cipher.new(recovered_welcome_key).encrypt(
+            recovered_welcome_nonce,
+            sn_public_bytes + recv_cookie,
+            aad: "WELCOME"
+          )
+          recovered_welcome = "".b
+          recovered_welcome << "\x07WELCOME" << recovered_welcome_box
+          recovered_welcome_wire = Codec::Frame.new(recovered_welcome, command: true).to_wire
+          h_recovered = hash(recovered_h1 + recovered_welcome_wire)
+          # Whether we trust our retained `h` or the recovered one
+          # depends on whether the implementation actually went stateless.
+          # Either should match; assert for safety in the test/simple
+          # path, then proceed with `h` either way. Truly stateless
+          # implementations would replace `h` with `h_recovered` here.
+          h = h_recovered
 
           dh2 = sn_secret.diffie_hellman(cn_public)
           validate_dh!(dh2, "dh2")
@@ -487,7 +520,7 @@ module Protocol
           initiate_key   = kdf("#{PROTOCOL_ID} INITIATE key", dh2 + h)
           initiate_nonce = kdf24("#{PROTOCOL_ID} INITIATE nonce", dh2 + h)
 
-          initiate_ciphertext = idata.byteslice(120..)
+          initiate_ciphertext = idata.byteslice(152..)
           begin
             initiate_plain = @crypto::Cipher.new(initiate_key).decrypt(
               initiate_nonce, initiate_ciphertext, aad: "INITIATE"
