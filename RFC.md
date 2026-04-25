@@ -11,8 +11,9 @@
 
 BLAKE3ZMQ provides authenticated encryption and perfect forward secrecy for
 ZMQ connections using X25519 key exchange, ChaCha20-BLAKE3 AEAD, and BLAKE3
-key derivation. It targets ZMQ single-frame socket types (SERVER/CLIENT,
-RADIO/DISH, GATHER/SCATTER).
+key derivation. It is compatible with every ZMQ socket type, including
+multipart-using legacy types (PUSH/PULL, REQ/REP, ROUTER/DEALER, PUB/SUB)
+and single-frame draft types (SERVER/CLIENT, RADIO/DISH, GATHER/SCATTER).
 
 ## 2. Goals
 
@@ -30,7 +31,6 @@ RADIO/DISH, GATHER/SCATTER).
 
 ## 3. Non-Goals
 
-- Legacy multi-frame socket support (see Section 15)
 - Cipher agility or version negotiation
 - Post-quantum key exchange
 - Re-keying within a connection
@@ -377,10 +377,13 @@ Each message is a single ZMTP message frame (not a command frame):
              |<---------- length = N + 32 ------------------>|
 ```
 
-- `flags`: Standard ZMTP 3.1 flags byte. MORE bit (bit 0) MUST be zero
-  (single-frame messages only). COMMAND bit (bit 2) MUST be zero
-  (data-phase frames are not commands). LONG bit (bit 1) is set when
-  `length` requires the 8-byte encoding.
+- `flags`: Standard ZMTP 3.1 flags byte. MORE bit (bit 0) carries
+  multipart-message semantics from the application unchanged: set on
+  every frame of a multipart message except the last. COMMAND bit
+  (bit 2) MUST be zero (data-phase frames are never commands; ZMTP
+  command frames bypass the BLAKE3ZMQ data-phase entirely and are
+  not encrypted). LONG bit (bit 1) is set when `length` requires the
+  8-byte encoding.
 - `length`: Ciphertext length + 32 (tag size). Encoded as 1 byte
   (when ≤ 255) or 8 bytes big-endian (when > 255), per ZMTP 3.1.
 - `ciphertext`: The encrypted message payload.
@@ -450,6 +453,45 @@ peers discard the session.
 
 If decryption fails, the Session counter is NOT advanced. The peer MUST
 close the connection.
+
+### 10.6 Multipart Atomicity
+
+A multipart message is a sequence of frames where every frame except
+the last carries `MORE = 1`. Each frame is independently AEAD-encrypted
+with its own per-direction nonce; the receiver's session counter
+advances per frame.
+
+The receiver MUST NOT deliver any plaintext part of an in-progress
+multipart message to the application until every part of that message
+has been received and AEAD-verified. If any part fails verification,
+the receiver MUST close the connection and discard every plaintext
+part of the in-progress message that has already been buffered;
+**no truncated message ever reaches the application.** Earlier
+already-delivered messages on the same connection are unaffected.
+
+This rule is implementable as on-the-fly per-frame decrypt-then-buffer:
+
+```
+buffer = []
+for each incoming frame f of the in-progress message:
+    plaintext = decrypt(f)              # advances counter on success
+    if decrypt fails: close, discard buffer
+    buffer.append(plaintext)
+    if f.MORE == 0:
+        deliver buffer to application
+        buffer = []
+```
+
+The session counter advances *only* on successful AEAD verification —
+the buffered plaintexts are dropped, but the counters at both peers
+remain synchronized through the failure point and the close that
+follows. (The connection is dead at that point regardless, so counter
+state past the failure is moot.)
+
+Implementations MAY equivalently buffer ciphertexts and verify all
+tags before any decryption, provided the same atomicity guarantee
+holds. The on-the-fly approach is recommended because it streams
+under network I/O instead of producing a CPU spike at the last frame.
 
 ## 11. Overhead
 
@@ -555,29 +597,31 @@ Standard properties:
 
 Implementations MUST ignore unknown properties.
 
-## 15. Future Work: Legacy Socket Support
+## 15. Future Work: Single-Blob Multipart Encryption
 
-A future RFC MAY extend BLAKE3ZMQ to legacy socket types (REQ/REP,
-ROUTER/DEALER, PUB/SUB, PUSH/PULL, etc.) which use multi-frame messages.
-
-The recommended approach: the security mechanism collapses outgoing
-multi-frame messages into a single encrypted blob and reconstructs frames
-on the receiver side. The blob contains a serialized frame sequence:
+This RFC encrypts each ZMTP frame independently — N parts produce N
+ChaCha20-BLAKE3 invocations and N 32-byte tags. A future revision MAY
+add a single-blob alternative that collapses an outgoing multipart
+message into one buffer, encrypts it once, and reconstructs frames on
+the receiver. The blob would carry an internal frame sequence:
 
 ```
 [frame1_len (8 bytes LE)] [frame1_data] [frame2_len (8 bytes LE)] [frame2_data] ...
 ```
 
-This approach:
+The single-blob mode would:
 
-- Requires a sender-side memcpy to serialize frames into one buffer
-- Uses one AEAD operation per message (not per frame)
-- Hides frame count and individual frame sizes from observers
-- Is transparent to the socket type -- no application changes required
-- Enables zero-copy on the receiver via sub-buffer referencing:
-  `String#byteslice` on a frozen backing buffer (Ruby),
-  `ByteBuffer.slice()` (Java), `memoryview` (Python),
-  or pointer arithmetic (C/C++)
+- Save 32 × (N − 1) bytes of tag overhead per N-part message
+- Use one AEAD operation per message instead of per frame
+- Hide frame count and individual frame sizes from a wire observer
+- Cost a sender-side memcpy to serialize frames into one buffer
+- Require a wire-format negotiation point (or a different mechanism
+  name) to coexist with the per-frame mode specified here
+
+The per-frame mode in this RFC is the baseline because it requires no
+extra buffering and streams under network I/O. The single-blob mode is
+worth exploring when traffic-analysis resistance or per-message
+overhead at large N becomes a bottleneck.
 
 ## 16. Constants
 
