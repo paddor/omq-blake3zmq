@@ -583,8 +583,59 @@ protected by the ephemeral key exchange.
 | Low-order point rejection | All DH outputs MUST be checked for all-zero value; abort on detection |
 | Frame flag integrity | Flags byte authenticated as AAD; prevents bit-flip attacks on frame type |
 | Cookie key rotation | Cookie key K rotated every 60s; limits forward secrecy exposure window |
+| Control-plane confidentiality | SUBSCRIBE / CANCEL / JOIN / LEAVE / PING / PONG / ERROR all AEAD-encrypted (§7, §10.3) — no plaintext post-handshake frame on the wire |
+| Control-plane integrity | Same AEAD as data; an attacker cannot tamper with subscriptions, group membership, heartbeats, or rejection signals without detection |
 
-### 13.1 What BLAKE3ZMQ Does NOT Protect
+### 13.1 Comparison with CurveZMQ
+
+BLAKE3ZMQ is strictly stronger than CurveZMQ on the control plane.
+RFC 26 / CurveZMQ wraps each application *message* in a `MESSAGE`
+command that carries the AEAD ciphertext, but every *other*
+post-handshake command frame — SUBSCRIBE, CANCEL, JOIN, LEAVE, PING,
+PONG, ERROR — crosses the wire in plaintext. That model leaks:
+
+- **Subscription topic prefixes** (SUB → PUB). A wire observer learns
+  the exact byte sequences a subscriber is interested in. In topic
+  schemes like `tenant-1234.events`, `prices.acme.deals.X`, or
+  `health.patient-XYZ.diagnosis` this is a meaningful information
+  disclosure even when message bodies are encrypted.
+- **Group memberships** (DISH → RADIO). Same property for the draft
+  group-multicast pattern.
+- **Heartbeat content** (PING/PONG context bytes, when set).
+- **Application-level rejection reasons** (ERROR command body).
+
+It also lets an active on-path attacker tamper with the control
+plane to influence what data gets delivered, even though the data
+itself is sealed. Examples:
+
+- Flip bits in a SUBSCRIBE prefix → SUB silently subscribes to the
+  wrong topic; application sees missing messages with no obvious
+  cause.
+- Drop a CANCEL → SUB continues receiving topics it tried to
+  unsubscribe from.
+- Inject a fabricated SUBSCRIBE? Detectable in CurveZMQ only by
+  application-level checks; BLAKE3ZMQ rejects it at the AEAD layer.
+
+BLAKE3ZMQ extends the AEAD coverage to *every* post-handshake frame,
+closing the entire control-plane channel. The wire is a uniform
+stream of encrypted frames; the COMMAND bit (in the AAD) decides
+how the receiver parses the verified plaintext, but never whether
+the bytes were protected.
+
+| Property | CurveZMQ | BLAKE3ZMQ |
+|---|---|---|
+| Application data | Encrypted (MESSAGE commands) | Encrypted |
+| SUBSCRIBE / CANCEL | **Plaintext** | **Encrypted** |
+| JOIN / LEAVE | **Plaintext** | **Encrypted** |
+| PING / PONG | **Plaintext** | **Encrypted** |
+| ERROR (post-handshake) | **Plaintext** | **Encrypted** |
+| Frame-flag bit-flip | Detected for data frames only | Detected for every frame |
+| Wire bytes not encrypted-or-AAD'd | Command headers + bodies | None |
+
+The cost of this extra coverage is one AEAD pass per command frame
+(33 B/min on a typical 30 s heartbeat — negligible).
+
+### 13.2 What BLAKE3ZMQ Does NOT Protect
 
 - **Message size**: The total encrypted message size is visible in the ZMTP
   length field. Traffic analysis based on message sizes is possible.
