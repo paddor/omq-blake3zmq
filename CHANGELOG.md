@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-05-20
+
 ### Changed
 
 - **Gem renamed to `omq-blake3zmq`** (from `omq-rfc-blake3zmq`). Require

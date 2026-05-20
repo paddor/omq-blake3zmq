@@ -3,6 +3,6 @@
 module OMQ
   # BLAKE3-based encryption mechanism for ZMTP connections.
   module Blake3ZMQ
-    VERSION = "0.2.1"
+    VERSION = "0.3.0"
   end
 end
