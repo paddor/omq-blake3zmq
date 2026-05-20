@@ -20,7 +20,7 @@ See [RFC.md](RFC.md) for the full protocol specification.
 ## Features
 
 * 4-message handshake (HELLO, WELCOME, INITIATE, READY)
-* Transcript hash binding across all handshake messages
+* Transcript hash binding across all handshake messages; all post-handshake frames (including commands) AEAD-encrypted, unlike CurveZMQ
 * Deterministic nonces (no per-message randomness needed)
 * 32 bytes overhead per message (no wire nonce, no command wrapper)
 * Stateless server until client authentication (cookie mechanism)
