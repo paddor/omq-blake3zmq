@@ -1,11 +1,11 @@
 # BLAKE3ZMQ: Secure Transport for ZMQ Draft Sockets
 
-| Field       | Value                                              |
-|-------------|----------------------------------------------------|
-| Status      | Draft                                              |
-| Editor      |                                                    |
-| Replaces    | [RFC 26/CurveZMQ](https://rfc.zeromq.org/spec/26/) |
-| Requires    | [RFC 37/ZMTP 3.1](https://rfc.zeromq.org/spec/37/) |
+| Field    | Value                                              |
+|----------|----------------------------------------------------|
+| Status   | Draft                                              |
+| Editor   | Patrik Wenger                                      |
+| Replaces | [RFC 26/CurveZMQ](https://rfc.zeromq.org/spec/26/) |
+| Requires | [RFC 37/ZMTP 3.1](https://rfc.zeromq.org/spec/37/) |
 
 ## 1. Abstract
 
@@ -15,27 +15,36 @@ key derivation. It is compatible with every ZMQ socket type, including
 multipart-using legacy types (PUSH/PULL, REQ/REP, ROUTER/DEALER, PUB/SUB)
 and single-frame draft types (SERVER/CLIENT, RADIO/DISH, GATHER/SCATTER).
 
-## 2. Goals
+
+## 2. Language
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+"SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+document are to be interpreted as described in
+[RFC 2119](https://datatracker.ietf.org/doc/html/rfc2119).
+
+
+## 3. Goals
 
 - Protection of client identity
 - Equal or better security properties than CurveZMQ
 - Perfect forward secrecy via ephemeral Diffie-Hellman
 - Replay immunity via ephemeral keys and transcript binding
 - Channel binding via BLAKE3 transcript hash (chaining key)
-- No NIST primitives -- DJB cryptography throughout
+- No NIST primitives. DJB cryptography throughout
 - Zero-copy encryption on both sender and receiver
 - 32 bytes overhead per message (one BLAKE3 authentication tag)
 - No negotiation, renegotiation, or re-keying
 - Stateless server until client authentication (cookie mechanism)
 - Good performance on any CPU
 
-## 3. Non-Goals
+## 4. Non-Goals
 
 - Cipher agility or version negotiation
 - Post-quantum key exchange
 - Re-keying within a connection
 
-## 4. Primitives
+## 5. Primitives
 
 | Primitive           | Parameters                | Purpose              |
 |---------------------|---------------------------|----------------------|
@@ -47,7 +56,7 @@ and single-frame draft types (SERVER/CLIENT, RADIO/DISH, GATHER/SCATTER).
 All primitives are constant-time. Implementations can take advantage of
 SIMD acceleration (x86-64: AVX2/AVX-512; ARM: NEON/SVE).
 
-## 5. Notation
+## 6. Notation
 
 | Symbol              | Meaning                                          |
 |---------------------|--------------------------------------------------|
@@ -64,7 +73,7 @@ SIMD acceleration (x86-64: AVX2/AVX-512; ARM: NEON/SVE).
 | `S', s'`            | Server ephemeral public/secret key               |
 | `K`                 | Cookie key (short-lived server secret)           |
 
-## 6. Key Types
+## 7. Key Types
 
 | Key              | Lifetime     | Size     | Purpose                        |
 |------------------|--------------|----------|--------------------------------|
@@ -77,7 +86,7 @@ SIMD acceleration (x86-64: AVX2/AVX-512; ARM: NEON/SVE).
 The server's permanent public key `S` MUST be distributed to clients out of
 band before any connection.
 
-## 7. ZMTP Integration
+## 8. ZMTP Integration
 
 BLAKE3ZMQ is a ZMTP 3.1 security mechanism. The mechanism name in the ZMTP
 greeting is `BLAKE3` (6 octets, null-padded to 20). The `as-server` field in
@@ -85,14 +94,14 @@ the greeting determines which peer is client and which is server.
 
 The handshake consists of four ZMTP command frames (HELLO, WELCOME,
 INITIATE, READY) carrying their own AEAD-encrypted boxes, followed by a
-data phase where **every frame — data or command — is AEAD-encrypted
+data phase where **every frame, data or command, is AEAD-encrypted
 under the per-direction session key**.
 
 In the data phase the ZMTP COMMAND bit (in the wire flags byte) is
 preserved through the encryption: it indicates that the encrypted
 plaintext is a ZMTP command (SUBSCRIBE / CANCEL / JOIN / LEAVE / PING /
 PONG / ERROR) rather than application message content. The COMMAND bit
-is part of the AAD (§10.3) so an attacker cannot reframe a data frame
+is part of the AAD (Sec. 11.3) so an attacker cannot reframe a data frame
 as a command or vice versa. There is no plaintext post-handshake frame
 on the wire.
 
@@ -102,7 +111,7 @@ length followed by the ASCII command name (per ZMTP 3.1); the remaining
 bytes are command-specific data. Total sizes include the name-length
 byte and name.
 
-## 8. Transcript Hash
+## 9. Transcript Hash
 
 A running hash `h` binds every handshake message to its predecessors:
 
@@ -117,11 +126,11 @@ h4 = H(h3 || READY_wire_bytes)
 `h0` includes both ZMTP greetings as a prologue, binding the mechanism
 name, version, and `as-server` bits into the transcript. All subsequent
 wire bytes include the ZMTP command header. This ensures both peers
-agree on the exact bytes exchanged. Any tampering with any message —
-including the greetings — causes all subsequent transcript hashes, and
+agree on the exact bytes exchanged. Any tampering with any message,
+including the greetings, causes all subsequent transcript hashes, and
 all keys derived from them, to diverge.
 
-## 9. Handshake
+## 10. Handshake
 
 ```
 Client                                    Server
@@ -137,7 +146,7 @@ Client                                    Server
   |========= encrypted data phase ===========|
 ```
 
-### 9.1 HELLO (Client -> Server)
+### 10.1 HELLO (Client -> Server)
 
 Client generates a fresh ephemeral keypair `(C', c')`.
 
@@ -180,14 +189,14 @@ operation; the relative ordering is preserved.)
 3. Decrypt `hello_box`. If decryption fails, silently drop (do not respond).
 4. Update transcript: `h1 = H(h0 || HELLO_wire_bytes)`.
 
-### 9.2 WELCOME (Server -> Client)
+### 10.2 WELCOME (Server -> Client)
 
 Server generates a fresh ephemeral keypair `(S', s')`.
 
 **Cookie construction:**
 
 The cookie lets the server discard the per-connection *cryptographic*
-state between WELCOME and INITIATE — the server's ephemeral secret
+state between WELCOME and INITIATE: the server's ephemeral secret
 key `s'`, the first DH shared secret `dh1`, and the running transcript
 hash. The TCP connection itself, its I/O buffers, and a marker that
 this connection is awaiting INITIATE are not affected; "stateless"
@@ -208,17 +217,17 @@ Cookie size: 24 + 96 + 32(tag) = 152 bytes.
 
 Note that the cookie carries `h1` (the transcript hash *before*
 WELCOME) rather than `h2`. Putting `h2` in the cookie would create
-a circularity — `h2 = H(h1 || welcome_wire)` and `welcome_wire`
+a circularity: `h2 = H(h1 || welcome_wire)` and `welcome_wire`
 embeds the cookie itself. Carrying `h1` lets the server recompute
 `h2` on receipt of INITIATE: chacha20-blake3 with a fixed
 (key, nonce, plaintext, aad) is deterministic, so the server can
 reconstruct the exact `welcome_wire` bytes it originally sent from
 the cookie's recovered values plus its own permanent secret, then
-hash them to obtain `h2`. See §9.3 server processing.
+hash them to obtain `h2`. See Sec. 10.3 server processing.
 
 The cookie nonce MUST be random because `K` is shared across connections.
 After creating the cookie, the server MAY discard `s'`, `dh1`, the
-transcript hash, and any other per-connection BLAKE3ZMQ state — every
+transcript hash, and any other per-connection BLAKE3ZMQ state. Every
 value the server needs at INITIATE time is either recoverable from
 the cookie or recomputable from values that are.
 The cookie key `K` MUST be rotated at least every 60 seconds.
@@ -258,7 +267,7 @@ Total command body: 8 + 216 = 224 bytes.
 2. Decrypt `welcome_box` to obtain `S'` and `cookie`.
 3. Update transcript: `h2 = H(h1 || WELCOME_wire_bytes)`.
 
-### 9.3 INITIATE (Client -> Server)
+### 10.3 INITIATE (Client -> Server)
 
 **Derived values:**
 
@@ -330,12 +339,12 @@ Initiate box: 32(C) + 96(vouch) + metadata + 32(tag) = 160 + metadata bytes.
 
 Step 2's cost is one extra ChaCha20-BLAKE3 encryption per INITIATE
 (the welcome_box reconstruction). On a per-connection basis this is
-negligible. Implementations that don't need the stateless property
-MAY skip steps 2–3 by retaining `h2` from the WELCOME-send time;
+negligible. Implementations that do not need the stateless property
+MAY skip steps 2-3 by retaining `h2` from the WELCOME-send time;
 both paths produce the same `h2` value because welcome_wire
 reconstruction is deterministic.
 
-### 9.4 READY (Server -> Client)
+### 10.4 READY (Server -> Client)
 
 ```
 ready_key   = KDF("BLAKE3ZMQ-1.0 READY key", dh2 || h3)
@@ -361,7 +370,7 @@ Ready box: metadata + 32(tag) bytes.
 2. Decrypt `ready_box` to obtain server metadata.
 3. Update transcript: `h4 = H(h3 || READY_wire_bytes)`.
 
-### 9.5 ERROR (Server -> Client)
+### 10.5 ERROR (Server -> Client)
 
 At any point during the handshake, the server MAY send an ERROR command
 instead of the expected response:
@@ -377,9 +386,9 @@ instead of the expected response:
 Where reason is a length-prefixed ASCII string (0-255 bytes). The client
 MUST close the connection upon receiving ERROR.
 
-## 10. Data Phase
+## 11. Data Phase
 
-### 10.1 Key Derivation
+### 11.1 Key Derivation
 
 After READY, both peers derive directional session keys from the final
 transcript hash and the ephemeral DH secret:
@@ -394,9 +403,9 @@ s2c_nonce = KDF24("BLAKE3ZMQ-1.0 server->client nonce", h4 || dh2)
 
 Each direction gets a Session initialized with `(key, nonce)`. The
 Session manages per-message nonce derivation internally via a monotonic
-counter (see Section 10.2).
+counter (see Sec. 11.2).
 
-### 10.2 Session Nonce Derivation
+### 11.2 Session Nonce Derivation
 
 Each Session splits its 24-byte initial nonce into:
 
@@ -415,7 +424,7 @@ This produces 2^64 unique nonces per session. Implementations MUST close
 the connection if the counter reaches 2^64. Nonce reuse under the same
 key is catastrophic for any stream cipher.
 
-### 10.3 Wire Format
+### 11.3 Wire Format
 
 **Every post-handshake frame is AEAD-encrypted, with no exceptions.**
 The same wire shape applies whether the plaintext body is application
@@ -438,15 +447,15 @@ parses the *plaintext* after AEAD verification:
   than application data. LONG bit (bit 1) is set when `length`
   requires the 8-byte encoding.
 - `length`: Ciphertext length + 32 (tag size). Encoded as 1 byte
-  (when ≤ 255) or 8 bytes big-endian (when > 255), per ZMTP 3.1.
+  (when <= 255) or 8 bytes big-endian (when > 255), per ZMTP 3.1.
 - `ciphertext`: The encrypted frame body. For data frames this is
   the application payload. For command frames it is the ZMTP command
   body (`name_len || name || command-data`).
 - `tag`: 32-byte BLAKE3 authentication tag.
 
-The receiver demultiplexes data vs command on the wire COMMAND bit
+The receiver demultiplexes data vs. command on the wire COMMAND bit
 *after* AEAD verification: the bit is part of `flags`, which is in
-the AAD, so it cannot be flipped without detection (§10.3 AAD).
+the AAD, so it cannot be flipped without detection (Sec. 11.3 AAD).
 Subscriptions, group joins, heartbeats, and rejection signals all
 travel through the same encrypted pipe as application data. There is
 no plaintext post-handshake frame on the wire.
@@ -461,8 +470,8 @@ aad = flags_byte || length_bytes
 
 where `flags_byte` is the exact 1-byte value transmitted (including the
 LONG bit when set) and `length_bytes` is the exact 1- or 8-byte length
-encoding transmitted. The remaining wire bytes — `ciphertext` and `tag`
-— are protected by the AEAD itself.
+encoding transmitted. The remaining wire bytes, `ciphertext` and `tag`,
+are protected by the AEAD itself.
 
 This guarantees that **no wire byte can be modified without detection**:
 flipping any bit in `flags` (MORE / LONG / COMMAND), or any bit in
@@ -483,7 +492,7 @@ No counter is sent on the wire. Both peers maintain synchronized internal
 counters. TCP guarantees ordered delivery; if the connection breaks, both
 peers discard the session.
 
-### 10.4 Sender (Zero-Copy)
+### 11.4 Sender (Zero-Copy)
 
 ```
 1. encrypt_in_place_detached(plaintext_buffer)
@@ -496,7 +505,7 @@ peers discard the session.
    -> single syscall, no copy
 ```
 
-### 10.5 Receiver (Zero-Copy)
+### 11.5 Receiver (Zero-Copy)
 
 ```
 1. Read ZMTP header -> learn total length L.
@@ -516,7 +525,7 @@ peers discard the session.
 If decryption fails, the Session counter is NOT advanced. The peer MUST
 close the connection.
 
-### 10.6 Multipart Atomicity
+### 11.6 Multipart Atomicity
 
 A multipart message is a sequence of frames where every frame except
 the last carries `MORE = 1`. Each frame is independently AEAD-encrypted
@@ -544,8 +553,8 @@ for each incoming frame f of the in-progress message:
         buffer = []
 ```
 
-The session counter advances *only* on successful AEAD verification —
-the buffered plaintexts are dropped, but the counters at both peers
+The session counter advances *only* on successful AEAD verification.
+The buffered plaintexts are dropped, but the counters at both peers
 remain synchronized through the failure point and the close that
 follows. (The connection is dead at that point regardless, so counter
 state past the failure is moot.)
@@ -555,7 +564,7 @@ tags before any decryption, provided the same atomicity guarantee
 holds. The on-the-fly approach is recommended because it streams
 under network I/O instead of producing a CPU spike at the last frame.
 
-## 11. Overhead
+## 12. Overhead
 
 | Per message          | Bytes |
 |----------------------|-------|
@@ -575,7 +584,7 @@ Compared to CurveZMQ:
 
 BLAKE3ZMQ has 9 bytes less overhead per message despite a larger tag.
 
-## 12. Authentication Modes
+## 13. Authentication Modes
 
 The INITIATE box always contains `C || vouch_box || metadata`. The wire
 format is identical regardless of authentication mode. The authentication
@@ -584,7 +593,7 @@ present), not negotiated on the wire.
 
 The server MUST always verify the vouch cryptographically.
 
-### 12.1 Server-Only Mode
+### 13.1 Server-Only Mode
 
 The server has a permanent keypair `(S, s)`. Clients without pre-existing
 permanent keys generate an ephemeral permanent keypair for the connection.
@@ -594,7 +603,7 @@ The server authenticates to the client (the client verified `S` via the
 HELLO box). The client's identity is ephemeral and not meaningful for
 authorization.
 
-### 12.2 Mutual Authentication
+### 13.2 Mutual Authentication
 
 Both peers have long-lived permanent keypairs. The client's permanent
 public key `C` and vouch are sent inside the INITIATE box, encrypted
@@ -603,10 +612,10 @@ under the ephemeral session keys.
 The server verifies the vouch and checks `C` against its set of authorized
 client keys. The server MAY reject unknown clients with an ERROR command.
 
-The client's permanent public key is never sent in cleartext -- it is
+The client's permanent public key is never sent in cleartext. It is
 protected by the ephemeral key exchange.
 
-## 13. Security Properties
+## 14. Security Properties
 
 | Property | Mechanism |
 |---|---|
@@ -618,28 +627,28 @@ protected by the ephemeral key exchange.
 | No reflection attacks | Separate keys per direction (client->server != server->client) |
 | Identity protection | Client permanent key encrypted under ephemeral keys |
 | Anti-amplification | HELLO (232 bytes) >= WELCOME (224 bytes) |
-| Stateless server | Cookie carries `C' \|\| s' \|\| h1`; server discards all per-connection *cryptographic* state (`s'`, `dh1`, transcript hash) after WELCOME and recovers it from the cookie at INITIATE (recomputing `h2` via deterministic welcome_wire reconstruction; §9.3). The TCP connection itself stays open. |
+| Stateless server | Cookie carries `C' \|\| s' \|\| h1`; server discards all per-connection *cryptographic* state (`s'`, `dh1`, transcript hash) after WELCOME and recovers it from the cookie at INITIATE (recomputing `h2` via deterministic welcome_wire reconstruction; Sec. 10.3). The TCP connection itself stays open. |
 | Nonce misuse resistance | Nonces derived deterministically from DH and transcript; no randomness needed after ephemeral key generation |
 | Low-order point rejection | All DH outputs MUST be checked for all-zero value; abort on detection |
 | Frame flag integrity | Flags byte authenticated as AAD; prevents bit-flip attacks on frame type |
 | Cookie key rotation | Cookie key K rotated every 60s; limits forward secrecy exposure window |
-| Control-plane confidentiality | SUBSCRIBE / CANCEL / JOIN / LEAVE / PING / PONG / ERROR all AEAD-encrypted (§7, §10.3) — no plaintext post-handshake frame on the wire |
+| Control-plane confidentiality | SUBSCRIBE / CANCEL / JOIN / LEAVE / PING / PONG / ERROR all AEAD-encrypted (Sec. 8, Sec. 11.3). No plaintext post-handshake frame on the wire |
 | Control-plane integrity | Same AEAD as data; an attacker cannot tamper with subscriptions, group membership, heartbeats, or rejection signals without detection |
 
-### 13.1 Comparison with CurveZMQ
+### 14.1 Comparison with CurveZMQ
 
 BLAKE3ZMQ is strictly stronger than CurveZMQ on the control plane.
 RFC 26 / CurveZMQ wraps each application *message* in a `MESSAGE`
-command that carries the AEAD ciphertext, but every *other*
-post-handshake command frame — SUBSCRIBE, CANCEL, JOIN, LEAVE, PING,
-PONG, ERROR — crosses the wire in plaintext. That model leaks:
+command that carries the AEAD ciphertext, but every other
+post-handshake command frame (SUBSCRIBE, CANCEL, JOIN, LEAVE, PING,
+PONG, ERROR) crosses the wire in plaintext. That model leaks:
 
-- **Subscription topic prefixes** (SUB → PUB). A wire observer learns
+- **Subscription topic prefixes** (SUB -> PUB). A wire observer learns
   the exact byte sequences a subscriber is interested in. In topic
   schemes like `tenant-1234.events`, `prices.acme.deals.X`, or
   `health.patient-XYZ.diagnosis` this is a meaningful information
   disclosure even when message bodies are encrypted.
-- **Group memberships** (DISH → RADIO). Same property for the draft
+- **Group memberships** (DISH -> RADIO). Same property for the draft
   group-multicast pattern.
 - **Heartbeat content** (PING/PONG context bytes, when set).
 - **Application-level rejection reasons** (ERROR command body).
@@ -648,10 +657,10 @@ It also lets an active on-path attacker tamper with the control
 plane to influence what data gets delivered, even though the data
 itself is sealed. Examples:
 
-- Flip bits in a SUBSCRIBE prefix → SUB silently subscribes to the
+- Flip bits in a SUBSCRIBE prefix: SUB silently subscribes to the
   wrong topic; application sees missing messages with no obvious
   cause.
-- Drop a CANCEL → SUB continues receiving topics it tried to
+- Drop a CANCEL: SUB continues receiving topics it tried to
   unsubscribe from.
 - Inject a fabricated SUBSCRIBE? Detectable in CurveZMQ only by
   application-level checks; BLAKE3ZMQ rejects it at the AEAD layer.
@@ -673,9 +682,9 @@ the bytes were protected.
 | Wire bytes not encrypted-or-AAD'd | Command headers + bodies | None |
 
 The cost of this extra coverage is one AEAD pass per command frame
-(33 B/min on a typical 30 s heartbeat — negligible).
+(33 B/min on a typical 30 s heartbeat; negligible).
 
-### 13.2 What BLAKE3ZMQ Does NOT Protect
+### 14.2 What BLAKE3ZMQ Does NOT Protect
 
 - **Message size**: The total encrypted message size is visible in the ZMTP
   length field. Traffic analysis based on message sizes is possible.
@@ -684,7 +693,7 @@ The cost of this extra coverage is one AEAD pass per command frame
 - **Denial of service**: An attacker can drop or corrupt TCP segments,
   causing connection failure.
 
-## 14. Metadata
+## 15. Metadata
 
 Both INITIATE and READY carry a metadata block. Metadata is encoded as a
 sequence of name-value properties:
@@ -710,9 +719,9 @@ Standard properties:
 
 Implementations MUST ignore unknown properties.
 
-## 15. Future Work: Single-Blob Multipart Encryption
+## 16. Future Work: Single-Blob Multipart Encryption
 
-This RFC encrypts each ZMTP frame independently — N parts produce N
+This RFC encrypts each ZMTP frame independently. N parts produce N
 ChaCha20-BLAKE3 invocations and N 32-byte tags. A future revision MAY
 add a single-blob alternative that collapses an outgoing multipart
 message into one buffer, encrypts it once, and reconstructs frames on
@@ -724,7 +733,7 @@ the receiver. The blob would carry an internal frame sequence:
 
 The single-blob mode would:
 
-- Save 32 × (N − 1) bytes of tag overhead per N-part message
+- Save 32 * (N - 1) bytes of tag overhead per N-part message
 - Use one AEAD operation per message instead of per frame
 - Hide frame count and individual frame sizes from a wire observer
 - Cost a sender-side memcpy to serialize frames into one buffer
@@ -736,24 +745,24 @@ extra buffering and streams under network I/O. The single-blob mode is
 worth exploring when traffic-analysis resistance or per-message
 overhead at large N becomes a bottleneck.
 
-## 16. Constants
+## 17. Constants
 
-```
-KEY_SIZE        = 32    # bytes
-NONCE_SIZE      = 24    # bytes
-TAG_SIZE        = 32    # bytes
-COOKIE_SIZE     = 152   # bytes (24 nonce + 96 payload + 32 tag)
-                        # payload = C'(32) || s'(32) || h1(32)
-MECHANISM_NAME  = "BLAKE3"
-PROTOCOL_ID     = "BLAKE3ZMQ-1.0"
-```
+| Constant       | Value                                                                    |
+|----------------|--------------------------------------------------------------------------|
+| Key size       | 32 bytes                                                                 |
+| Nonce size     | 24 bytes                                                                 |
+| Tag size       | 32 bytes                                                                 |
+| Cookie size    | 152 bytes (24 nonce + 96 payload + 32 tag; payload = C'(32) \|\| s'(32) \|\| h1(32)) |
+| Mechanism name | `BLAKE3`                                                                 |
+| Protocol ID    | `BLAKE3ZMQ-1.0`                                                          |
 
-## 17. References
+## 18. References
 
-- [RFC 26/CurveZMQ](https://rfc.zeromq.org/spec/26/) -- predecessor protocol
-- [RFC 37/ZMTP 3.1](https://rfc.zeromq.org/spec/37/) -- underlying transport
-- [X25519 (RFC 7748)](https://tools.ietf.org/html/rfc7748) -- Diffie-Hellman
-- [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) -- hash function and KDF
-- [The Noise Protocol Framework](https://noiseprotocol.org/noise.html) -- inspiration for transcript hash pattern
-- [ChaCha20-BLAKE3 AEAD](https://github.com/skerkour/chacha20-blake3) -- AEAD construction combining ChaCha20 and BLAKE3
-- [ChaCha20-BLAKE3: Secure, Simple and Fast](https://kerkour.com/chacha20-blake3) -- design rationale for ChaCha20-BLAKE3
+- [RFC 26/CurveZMQ](https://rfc.zeromq.org/spec/26/)
+- [RFC 37/ZMTP 3.1](https://rfc.zeromq.org/spec/37/)
+- [RFC 2119](https://datatracker.ietf.org/doc/html/rfc2119)
+- [X25519 (RFC 7748)](https://tools.ietf.org/html/rfc7748)
+- [BLAKE3](https://github.com/BLAKE3-team/BLAKE3)
+- [The Noise Protocol Framework](https://noiseprotocol.org/noise.html)
+- [ChaCha20-BLAKE3 AEAD](https://github.com/skerkour/chacha20-blake3)
+- [ChaCha20-BLAKE3: Secure, Simple and Fast](https://kerkour.com/chacha20-blake3)
