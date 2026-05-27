@@ -62,7 +62,7 @@ server.mechanism = Protocol::ZMTP::Mechanism::Blake3.server(
 )
 server.bind("tcp://127.0.0.1:9999")
 
-# Client socket (keys optional — omit for anonymous/ephemeral identity)
+# Client socket (keys optional; omit for anonymous/ephemeral identity)
 client = OMQ::REQ.new
 client.mechanism = Protocol::ZMTP::Mechanism::Blake3.client(
   server_key: server_pk,
@@ -71,6 +71,75 @@ client.mechanism = Protocol::ZMTP::Mechanism::Blake3.client(
 )
 client.connect("tcp://127.0.0.1:9999")
 ```
+
+## Wire format
+
+### Handshake
+
+Four ZMTP command frames over plain TCP:
+
+```
+Client                              Server
+  |                                    |
+  |-- HELLO (C', hello_box) ---------> |  232 bytes
+  |                                    |
+  | <-- WELCOME (welcome_box) -------- |  224 bytes
+  |                                    |
+  |-- INITIATE (cookie, init_box) ---> |  variable
+  |                                    |
+  | <-- READY (ready_box) ------------ |  variable
+  |                                    |
+  |====== encrypted data phase ========|
+```
+
+HELLO carries the client's ephemeral public key `C'` and a box proving
+knowledge of the server's permanent public key `S`. WELCOME returns the
+server's ephemeral key `S'` inside a stateless cookie. INITIATE sends
+back the cookie plus the client's permanent key `C` and a vouch binding
+`C'` to `C`. READY confirms the session.
+
+### Data phase
+
+Every post-handshake frame (data and command) is AEAD-encrypted:
+
+```
++-----------+----------------+------------------+-----------+
+| flags     | length         | ciphertext       | tag       |
+| (1 byte)  | (1 or 8 bytes) | (N bytes)        | (32 bytes)|
++-----------+----------------+------------------+-----------+
+```
+
+The `flags` byte and `length` bytes are authenticated as AAD. No counter
+is sent on the wire; both peers derive per-message nonces from a
+synchronized monotonic counter and a session-unique nonce prefix.
+
+Unlike CurveZMQ, SUBSCRIBE/CANCEL/JOIN/LEAVE/PING/PONG/ERROR are all
+AEAD-encrypted. CurveZMQ sends these in plaintext, leaking subscription
+topics, group memberships, and heartbeat content.
+
+## Constants
+
+| Constant | Value |
+|---|---|
+| Key size | 32 bytes |
+| Nonce size | 24 bytes |
+| Tag size | 32 bytes |
+| Cookie size | 152 bytes (24 nonce + 96 payload + 32 tag) |
+| Mechanism name | `BLAKE3` (6 octets, null-padded to 20) |
+| Protocol ID | `BLAKE3ZMQ-1.0` |
+| HELLO body | 232 bytes |
+| WELCOME body | 224 bytes |
+
+## Per-message overhead
+
+| | BLAKE3ZMQ | CurveZMQ |
+|---|---:|---:|
+| Tag size | 32 bytes | 16 bytes |
+| Counter on wire | 0 bytes | 8 bytes |
+| Command wrapper | none | 17 bytes |
+| **Total** | **32 bytes** | **41 bytes** |
+
+BLAKE3ZMQ has 9 bytes less overhead per message despite a larger tag.
 
 ## Benchmarks
 
@@ -112,15 +181,6 @@ Run benchmarks yourself:
 ```
 OMQ_DEV=1 bundle exec ruby bench/throughput.rb
 ```
-
-## Per-message overhead
-
-| | BLAKE3ZMQ | CurveZMQ |
-|---|---:|---:|
-| Tag size | 32 bytes | 16 bytes |
-| Counter on wire | 0 bytes | 8 bytes |
-| Command wrapper | none | 17 bytes |
-| **Total** | **32 bytes** | **41 bytes** |
 
 ## Development
 
