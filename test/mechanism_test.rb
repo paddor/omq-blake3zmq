@@ -11,7 +11,7 @@ module NuckleCrypto
   CryptoError = ChaCha20Blake3::DecryptionError
   TAG_SIZE    = ChaCha20Blake3::TAG_SIZE
   Cipher      = ChaCha20Blake3::Cipher
-  Stream      = ChaCha20Blake3::Stream
+  Session     = ChaCha20Blake3::Session
 
   class PublicKey
     def initialize(bytes)
@@ -105,35 +105,35 @@ describe Protocol::ZMTP::Mechanism::Blake3 do
 
   # Verify exact byte counts from the RFC wire format diagrams.
   describe "wire format byte counts" do
-    it "HELLO command body is 200 bytes" do
-      # HELLO body = name_len(1) + "HELLO"(5) + version(2) + C'(32) + padding(64) + hello_box(96)
+    it "HELLO command body is 232 bytes" do
+      # HELLO body = name_len(1) + "HELLO"(5) + version(2) + C'(32) + padding(96) + hello_box(96)
       # hello_box = encrypt(zeros(64)) = 64 + 32(tag) = 96
       name_encoding = 1 + 5         # 0x05 + "HELLO"
       version       = 2             # 0x01, 0x00
       ephemeral_key = 32            # C'
-      padding       = 64            # anti-amplification
+      padding       = 96            # anti-amplification (HELLO >= WELCOME)
       hello_box     = 64 + 32       # plaintext(64 zeros) + tag(32)
 
       expected = name_encoding + version + ephemeral_key + padding + hello_box
-      assert_equal 200, expected
+      assert_equal 232, expected
     end
 
-    it "WELCOME command body is 192 bytes" do
-      # WELCOME body = name_len(1) + "WELCOME"(7) + welcome_box(184)
-      # welcome_box = encrypt(S'(32) + cookie(120)) = 152 + 32(tag) = 184
-      # cookie = nonce(24) + encrypt(C'(32) + s'(32)) = 24 + 64 + 32(tag) = 120
+    it "WELCOME command body is 224 bytes" do
+      # WELCOME body = name_len(1) + "WELCOME"(7) + welcome_box(216)
+      # welcome_box = encrypt(S'(32) + cookie(152)) = 184 + 32(tag) = 216
+      # cookie = nonce(24) + encrypt(C'(32) + s'(32) + h1(32)) = 24 + 96 + 32(tag) = 152
       name_encoding = 1 + 7         # 0x07 + "WELCOME"
-      cookie_size   = 24 + 32 + 32 + 32  # nonce + C' + s' + tag
+      cookie_size   = 24 + 32 + 32 + 32 + 32  # nonce + C' + s' + h1 + tag
       welcome_plain = 32 + cookie_size    # S' + cookie
       welcome_box   = welcome_plain + 32  # + tag
 
-      assert_equal 120, cookie_size
-      assert_equal 184, welcome_box
-      assert_equal 192, name_encoding + welcome_box
+      assert_equal 152, cookie_size
+      assert_equal 216, welcome_box
+      assert_equal 224, name_encoding + welcome_box
     end
 
     it "INITIATE mutual auth command body has correct structure" do
-      # INITIATE body = name_len(1) + "INITIATE"(8) + cookie(120) + initiate_box(variable)
+      # INITIATE body = name_len(1) + "INITIATE"(8) + cookie(152) + initiate_box(variable)
       # initiate_box = encrypt(C(32) + vouch_box(96) + metadata + tag(32))
       # vouch_box = encrypt(C'(32) + S(32)) = 64 + 32(tag) = 96
       name_encoding = 1 + 8         # 0x08 + "INITIATE"
@@ -143,7 +143,7 @@ describe Protocol::ZMTP::Mechanism::Blake3 do
 
       assert_equal 9, name_encoding
       assert_equal 96, vouch_box
-      assert_equal 120, 24 + 32 + 32 + 32  # cookie: nonce + payload + tag
+      assert_equal 152, 24 + 32 + 32 + 32 + 32  # cookie: nonce + C' + s' + h1 + tag
     end
 
     it "READY command body has correct structure" do
@@ -154,12 +154,12 @@ describe Protocol::ZMTP::Mechanism::Blake3 do
       assert_equal 6, name_encoding
     end
 
-    it "cookie is exactly 120 bytes" do
-      # cookie = random_nonce(24) + encrypt(C'(32) + s'(32), tag(32))
+    it "cookie is exactly 152 bytes" do
+      # cookie = random_nonce(24) + encrypt(C'(32) + s'(32) + h1(32), tag(32))
       nonce    = 24
-      payload  = 32 + 32   # C' + s'
+      payload  = 32 + 32 + 32   # C' + s' + h1
       tag      = 32
-      assert_equal 120, nonce + payload + tag
+      assert_equal 152, nonce + payload + tag
     end
 
     it "vouch box is exactly 96 bytes" do
@@ -170,8 +170,8 @@ describe Protocol::ZMTP::Mechanism::Blake3 do
     end
 
     it "HELLO >= WELCOME (anti-amplification)" do
-      hello_body   = 200
-      welcome_body = 192
+      hello_body   = 232
+      welcome_body = 224
       assert hello_body >= welcome_body, "HELLO (#{hello_body}) must be >= WELCOME (#{welcome_body})"
     end
 

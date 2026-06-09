@@ -49,9 +49,20 @@ document are to be interpreted as described in
 | Primitive           | Parameters                | Purpose              |
 |---------------------|---------------------------|----------------------|
 | X25519              | 32-byte keys              | Diffie-Hellman       |
-| ChaCha20-BLAKE3     | 32-byte key, 24-byte nonce, 32-byte tag | AEAD |
+| ChaCha20-BLAKE3     | 32-byte key, 24-byte nonce, 32-byte tag | Handshake AEAD |
+| ChaCha20-BLAKE3 Session | 32-byte enc key, 32-byte auth key, 8-byte nonce, continuous block counter, 32-byte tag | Data-phase AEAD (no per-message KDF) |
 | BLAKE3              | Variable output           | Transcript hash      |
 | BLAKE3-derive-key   | Context string + material | Key derivation       |
+
+The handshake uses the one-shot ChaCha20-BLAKE3 AEAD, which derives
+per-invocation subkeys via an internal BLAKE3 KDF from `(key, nonce)`.
+The data phase uses the **Session** construction from the same
+primitive family: it accepts pre-derived encryption and authentication
+keys directly and tracks a continuous ChaCha20 block counter across
+messages, avoiding the per-message KDF cost. A Session encrypts with
+ChaCha20 and authenticates with a BLAKE3 keyed MAC. This is the same
+pattern CurveZMQ uses with NaCl `crypto_box_afternm`: fixed symmetric
+keys, monotonically advancing counter.
 
 All primitives are constant-time. Implementations can take advantage of
 SIMD acceleration (x86-64: AVX2/AVX-512; ARM: NEON/SVE).
@@ -61,9 +72,13 @@ SIMD acceleration (x86-64: AVX2/AVX-512; ARM: NEON/SVE).
 | Symbol              | Meaning                                          |
 |---------------------|--------------------------------------------------|
 | `X25519(a, B)`      | ECDH: scalar multiply secret `a` by public `B`  |
-| `Encrypt(k, n, pt, aad)` | ChaCha20-BLAKE3 AEAD encrypt              |
-| `Decrypt(k, n, ct, aad)` | ChaCha20-BLAKE3 AEAD decrypt              |
+| `Encrypt(k, n, pt, aad)` | ChaCha20-BLAKE3 AEAD encrypt (handshake)  |
+| `Decrypt(k, n, ct, aad)` | ChaCha20-BLAKE3 AEAD decrypt (handshake)  |
+| `Session(ek, ak, n)` | Create a ChaCha20-BLAKE3 Session (data phase) |
+| `session.encrypt(pt, aad)` | Session AEAD encrypt (advances block counter) |
+| `session.decrypt(ct, aad)` | Session AEAD decrypt (counter unchanged on failure) |
 | `KDF(ctx, ikm)`     | `BLAKE3-derive-key(ctx, ikm)` -> 32 bytes        |
+| `KDF8(ctx, ikm)`    | `BLAKE3-derive-key(ctx, ikm)` truncated to 8 bytes |
 | `KDF24(ctx, ikm)`   | `BLAKE3-derive-key(ctx, ikm)` truncated to 24 bytes |
 | `H(input)`          | `BLAKE3(input)` -> 32 bytes                      |
 | `a \|\| b`          | Concatenation                                    |
@@ -95,7 +110,7 @@ the greeting determines which peer is client and which is server.
 The handshake consists of four ZMTP command frames (HELLO, WELCOME,
 INITIATE, READY) carrying their own AEAD-encrypted boxes, followed by a
 data phase where **every frame, data or command, is AEAD-encrypted
-under the per-direction session key**.
+under the per-direction Session**.
 
 In the data phase the ZMTP COMMAND bit (in the wire flags byte) is
 preserved through the encryption: it indicates that the encrypted
@@ -391,38 +406,77 @@ MUST close the connection upon receiving ERROR.
 ### 11.1 Key Derivation
 
 After READY, both peers derive directional session keys from the final
-transcript hash and the ephemeral DH secret:
+transcript hash and the ephemeral DH secret. Each direction gets three
+values: an encryption key, an authentication key, and an 8-byte ChaCha
+nonce:
 
 ```
-c2s_key   = KDF("BLAKE3ZMQ-1.0 client->server key",   h4 || dh2)
-c2s_nonce = KDF24("BLAKE3ZMQ-1.0 client->server nonce", h4 || dh2)
+c2s_enc_key  = KDF("BLAKE3ZMQ-1.0 client->server enc key",  h4 || dh2)
+c2s_auth_key = KDF("BLAKE3ZMQ-1.0 client->server auth key", h4 || dh2)
+c2s_nonce    = KDF8("BLAKE3ZMQ-1.0 client->server nonce",   h4 || dh2)
 
-s2c_key   = KDF("BLAKE3ZMQ-1.0 server->client key",   h4 || dh2)
-s2c_nonce = KDF24("BLAKE3ZMQ-1.0 server->client nonce", h4 || dh2)
+s2c_enc_key  = KDF("BLAKE3ZMQ-1.0 server->client enc key",  h4 || dh2)
+s2c_auth_key = KDF("BLAKE3ZMQ-1.0 server->client auth key", h4 || dh2)
+s2c_nonce    = KDF8("BLAKE3ZMQ-1.0 server->client nonce",   h4 || dh2)
 ```
 
-Each direction gets a Session initialized with `(key, nonce)`. The
-Session manages per-message nonce derivation internally via a monotonic
-counter (see Sec. 11.2).
-
-### 11.2 Session Nonce Derivation
-
-Each Session splits its 24-byte initial nonce into:
+Each direction gets a Session initialized with `(enc_key, auth_key,
+nonce)`:
 
 ```
-nonce_prefix = nonce[0, 16]     # 16 bytes (offset 0, length 16), fixed for session lifetime
-counter_base = nonce[16, 8]     # 8 bytes (offset 16, length 8), little-endian u64
+c2s_session = Session(c2s_enc_key, c2s_auth_key, c2s_nonce)
+s2c_session = Session(s2c_enc_key, s2c_auth_key, s2c_nonce)
 ```
 
-For message index `i` (starting at 0), the per-message nonce is:
+The client sends with `c2s_session` and receives with `s2c_session`;
+the server uses them in reverse.
+
+### 11.2 Session Construction
+
+A Session is a stateful AEAD that holds pre-derived encryption and
+authentication keys and tracks a continuous ChaCha20 block counter
+across messages. Unlike the one-shot `Encrypt`/`Decrypt` used during
+the handshake, a Session performs no per-message KDF: the keys are
+fixed for the lifetime of the connection and security relies on the
+ChaCha20 block counter producing a unique keystream for every byte
+position. This is the same construction CurveZMQ uses (fixed symmetric
+keys, advancing counter) and is secure because the ChaCha family
+guarantees unique keystreams for distinct block counter values under
+the same key and nonce.
+
+The Session is initialized with:
 
 ```
-message_nonce = nonce_prefix || to_le64(wrapping_add(counter_base, i))
+cipher        = ChaCha20(enc_key, nonce)    # 8-byte DJB nonce
+auth_key      = auth_key                    # 32-byte BLAKE3 MAC key
+block_counter = 0                           # 64-bit, counts 64-byte blocks
 ```
 
-This produces 2^64 unique nonces per session. Implementations MUST close
-the connection if the counter reaches 2^64. Nonce reuse under the same
-key is catastrophic for any stream cipher.
+**Encrypt** a frame payload:
+
+```
+1. Set cipher block counter to current block_counter.
+2. XOR plaintext with ChaCha20 keystream -> ciphertext.
+3. Advance block_counter by ceil(plaintext_len / 64).
+4. Compute tag = BLAKE3-keyed(auth_key, aad || le64(aad_len) || ciphertext || le64(ciphertext_len)).
+5. Return ciphertext || tag.
+```
+
+**Decrypt** a frame payload:
+
+```
+1. Split input into ciphertext and 32-byte tag.
+2. Compute expected_tag = BLAKE3-keyed(auth_key, aad || le64(aad_len) || ciphertext || le64(ciphertext_len)).
+3. Verify tag == expected_tag (constant-time). If mismatch: fail, do NOT advance counter.
+4. Set cipher block counter to current block_counter.
+5. XOR ciphertext with ChaCha20 keystream -> plaintext.
+6. Advance block_counter by ceil(ciphertext_len / 64).
+7. Return plaintext.
+```
+
+The block counter tracks 64-byte ChaCha blocks consumed, not messages.
+A 100-byte message advances the counter by 2 (ceil(100/64)). This
+allows arbitrary message sizes without wasting keystream material.
 
 ### 11.3 Wire Format
 
@@ -480,12 +534,12 @@ guarantee is independent of any internal length-binding the AEAD
 primitive may or may not perform.
 
 The sender computes `length_bytes` from `ciphertext_len = plaintext_len
-+ 32` *before* invoking the AEAD, then runs `Encrypt(key, nonce,
-plaintext, aad)` with the constructed AAD.
++ 32` *before* invoking the AEAD, then runs
+`session.encrypt(plaintext, aad)` with the constructed AAD.
 
 The receiver reconstructs the same AAD from the wire bytes it actually
 read (the `flags` byte it parsed and the `length` bytes it consumed),
-then runs `Decrypt(key, nonce, ciphertext, aad)`. Tag verification fails
+then runs `session.decrypt(ciphertext, aad)`. Tag verification fails
 if any of those bytes were modified in flight.
 
 No counter is sent on the wire. Both peers maintain synchronized internal
@@ -495,9 +549,10 @@ peers discard the session.
 ### 11.4 Sender (Zero-Copy)
 
 ```
-1. encrypt_in_place_detached(plaintext_buffer)
+1. session.encrypt_in_place_detached(plaintext_buffer, aad)
    -> ciphertext overwrites plaintext in same buffer
    -> tag returned as 32 bytes (stack-allocated)
+   -> block counter advances by ceil(plaintext_len / 64)
 
 2. Construct ZMTP header: flags + length(payload_len + 32)
 
@@ -514,23 +569,24 @@ peers discard the session.
 
 3. Split: ciphertext = buffer[0 .. L-32], tag = buffer[L-32 .. L]
 
-4. decrypt_in_place_detached(ciphertext, tag)
+4. session.decrypt_in_place_detached(ciphertext, tag, aad)
    -> plaintext overwrites ciphertext in same buffer
    -> raises error if authentication fails
+   -> block counter advances only on success
 
 5. Shrink buffer logical size by 32 bytes.
    -> application receives the buffer directly
 ```
 
-If decryption fails, the Session counter is NOT advanced. The peer MUST
-close the connection.
+If decryption fails, the Session block counter is NOT advanced. The
+peer MUST close the connection.
 
 ### 11.6 Multipart Atomicity
 
 A multipart message is a sequence of frames where every frame except
 the last carries `MORE = 1`. Each frame is independently AEAD-encrypted
-with its own per-direction nonce; the receiver's session counter
-advances per frame.
+under the per-direction Session; the Session's block counter advances
+per frame.
 
 The receiver MUST NOT deliver any plaintext part of an in-progress
 multipart message to the application until every part of that message
@@ -545,7 +601,7 @@ This rule is implementable as on-the-fly per-frame decrypt-then-buffer:
 ```
 buffer = []
 for each incoming frame f of the in-progress message:
-    plaintext = decrypt(f)              # advances counter on success
+    plaintext = session.decrypt(f)      # advances block counter on success
     if decrypt fails: close, discard buffer
     buffer.append(plaintext)
     if f.MORE == 0:
@@ -553,7 +609,7 @@ for each incoming frame f of the in-progress message:
         buffer = []
 ```
 
-The session counter advances *only* on successful AEAD verification.
+The block counter advances *only* on successful AEAD verification.
 The buffered plaintexts are dropped, but the counters at both peers
 remain synchronized through the failure point and the close that
 follows. (The connection is dead at that point regardless, so counter
@@ -628,7 +684,7 @@ protected by the ephemeral key exchange.
 | Identity protection | Client permanent key encrypted under ephemeral keys |
 | Anti-amplification | HELLO (232 bytes) >= WELCOME (224 bytes) |
 | Stateless server | Cookie carries `C' \|\| s' \|\| h1`; server discards all per-connection *cryptographic* state (`s'`, `dh1`, transcript hash) after WELCOME and recovers it from the cookie at INITIATE (recomputing `h2` via deterministic welcome_wire reconstruction; Sec. 10.3). The TCP connection itself stays open. |
-| Nonce misuse resistance | Nonces derived deterministically from DH and transcript; no randomness needed after ephemeral key generation |
+| Nonce misuse resistance | Session nonces derived deterministically from DH and transcript; block counter advances monotonically; no randomness needed after ephemeral key generation |
 | Low-order point rejection | All DH outputs MUST be checked for all-zero value; abort on detection |
 | Frame flag integrity | Flags byte authenticated as AAD; prevents bit-flip attacks on frame type |
 | Cookie key rotation | Cookie key K rotated every 60s; limits forward secrecy exposure window |
@@ -722,7 +778,7 @@ Implementations MUST ignore unknown properties.
 ## 16. Future Work: Single-Blob Multipart Encryption
 
 This RFC encrypts each ZMTP frame independently. N parts produce N
-ChaCha20-BLAKE3 invocations and N 32-byte tags. A future revision MAY
+Session encrypt/decrypt calls and N 32-byte tags. A future revision MAY
 add a single-blob alternative that collapses an outgoing multipart
 message into one buffer, encrypts it once, and reconstructs frames on
 the receiver. The blob would carry an internal frame sequence:
@@ -749,8 +805,9 @@ overhead at large N becomes a bottleneck.
 
 | Constant       | Value                                                                    |
 |----------------|--------------------------------------------------------------------------|
-| Key size       | 32 bytes                                                                 |
-| Nonce size     | 24 bytes                                                                 |
+| Key size       | 32 bytes (encryption key and authentication key each)                    |
+| Handshake nonce size | 24 bytes                                                             |
+| Session nonce size | 8 bytes (DJB ChaCha layout)                                          |
 | Tag size       | 32 bytes                                                                 |
 | Cookie size    | 152 bytes (24 nonce + 96 payload + 32 tag; payload = C'(32) \|\| s'(32) \|\| h1(32)) |
 | Mechanism name | `BLAKE3`                                                                 |

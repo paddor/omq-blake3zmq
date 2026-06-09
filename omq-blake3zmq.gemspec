@@ -19,6 +19,6 @@ Gem::Specification.new do |s|
 
   s.add_dependency "protocol-zmtp", ">= 0.3"
   s.add_dependency "blake3-rb", ">= 1.8"
-  s.add_dependency "chacha20blake3", ">= 0.2"
+  s.add_dependency "chacha20blake3", ">= 0.3"
   s.add_dependency "x25519", ">= 1.0"
 end

@@ -19,7 +19,7 @@ module Protocol
       #   backend::Cipher.new(key)
       #     #encrypt(nonce, plaintext, aad:) -> ciphertext+tag
       #     #decrypt(nonce, ciphertext+tag, aad:) -> plaintext
-      #   backend::Stream.new(key, nonce)
+      #   backend::Session.new(enc_key, auth_key, nonce)
       #     #encrypt(plaintext, aad:) -> ciphertext+tag
       #     #decrypt(ciphertext+tag, aad:) -> plaintext
       #   backend::Hash.digest(input) -> 32 bytes
@@ -100,8 +100,8 @@ module Protocol
             end
           end
 
-          @send_stream = nil
-          @recv_stream = nil
+          @send_session = nil
+          @recv_session = nil
         end
 
 
@@ -110,8 +110,8 @@ module Protocol
         # @param source [Blake3] the original mechanism being duplicated
         def initialize_dup(source)
           super
-          @send_stream = nil
-          @recv_stream = nil
+          @send_session = nil
+          @recv_session = nil
         end
 
 
@@ -183,7 +183,7 @@ module Protocol
           end
           aad = wire_flags + length_bytes
 
-          ct = @send_stream.encrypt(body, aad: aad)
+          ct = @send_session.encrypt(body, aad: aad)
 
           wire = String.new(encoding: Encoding::BINARY, capacity: aad.bytesize + frame_size)
           wire << aad << ct
@@ -215,7 +215,7 @@ module Protocol
           aad = wire_flags + length_bytes
 
           begin
-            pt = @recv_stream.decrypt(frame.body, aad: aad)
+            pt = @recv_session.decrypt(frame.body, aad: aad)
           rescue @crypto::CryptoError
             raise Error, "decryption failed"
           end
@@ -616,17 +616,19 @@ module Protocol
         def derive_session_keys!(h4, dh2, as_client:)
           ikm = h4 + dh2
 
-          c2s_key   = kdf("#{PROTOCOL_ID} client->server key", ikm)
-          c2s_nonce = kdf24("#{PROTOCOL_ID} client->server nonce", ikm)
-          s2c_key   = kdf("#{PROTOCOL_ID} server->client key", ikm)
-          s2c_nonce = kdf24("#{PROTOCOL_ID} server->client nonce", ikm)
+          c2s_enc_key  = kdf("#{PROTOCOL_ID} client->server enc key", ikm)
+          c2s_auth_key = kdf("#{PROTOCOL_ID} client->server auth key", ikm)
+          c2s_nonce    = kdf8("#{PROTOCOL_ID} client->server nonce", ikm)
+          s2c_enc_key  = kdf("#{PROTOCOL_ID} server->client enc key", ikm)
+          s2c_auth_key = kdf("#{PROTOCOL_ID} server->client auth key", ikm)
+          s2c_nonce    = kdf8("#{PROTOCOL_ID} server->client nonce", ikm)
 
           if as_client
-            @send_stream = @crypto::Stream.new(c2s_key, c2s_nonce)
-            @recv_stream = @crypto::Stream.new(s2c_key, s2c_nonce)
+            @send_session = @crypto::Session.new(c2s_enc_key, c2s_auth_key, c2s_nonce)
+            @recv_session = @crypto::Session.new(s2c_enc_key, s2c_auth_key, s2c_nonce)
           else
-            @send_stream = @crypto::Stream.new(s2c_key, s2c_nonce)
-            @recv_stream = @crypto::Stream.new(c2s_key, c2s_nonce)
+            @send_session = @crypto::Session.new(s2c_enc_key, s2c_auth_key, s2c_nonce)
+            @recv_session = @crypto::Session.new(c2s_enc_key, c2s_auth_key, c2s_nonce)
           end
         end
 
@@ -642,6 +644,11 @@ module Protocol
 
         def kdf(context, material)
           @crypto::Hash.derive_key(context, material)
+        end
+
+
+        def kdf8(context, material)
+          @crypto::Hash.derive_key(context, material, size: 8)
         end
 
 

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-06-09
+
+### Changed
+
+- **Breaking wire protocol change:** data-phase key derivation now produces
+  separate encryption and authentication keys plus an 8-byte nonce per
+  direction, matching the RFC's Session construction. KDF context strings
+  changed (`"client->server key"` to `"client->server enc key"`, etc.).
+  Peers running 0.3.x and 0.4.x cannot interoperate.
+- Data-phase AEAD uses `Session.new(enc_key, auth_key, nonce)` instead
+  of `Stream.new(key, nonce)`. The Session tracks a continuous ChaCha20
+  block counter across messages, eliminating the per-message BLAKE3 KDF.
+- Requires chacha20blake3 >= 0.3.0.
+- Crypto backend contract: `Session` replaces `Stream`.
+
 ## 0.3.0 — 2026-05-20
 
 ### Changed

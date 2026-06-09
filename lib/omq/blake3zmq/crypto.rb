@@ -13,7 +13,7 @@ module OMQ
       CryptoError = ChaCha20Blake3::DecryptionError
       TAG_SIZE    = ChaCha20Blake3::TAG_SIZE
       Cipher      = ChaCha20Blake3::Cipher
-      Stream      = ChaCha20Blake3::Stream
+      Session     = ChaCha20Blake3::Session
 
 
       # X25519 public key wrapper.
