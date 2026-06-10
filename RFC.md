@@ -1,4 +1,4 @@
-# BLAKE3ZMQ: Secure Transport for ZMQ Draft Sockets
+# BLAKE3ZMQ: Secure Transport for ZMQ Sockets
 
 | Field    | Value                                              |
 |----------|----------------------------------------------------|
